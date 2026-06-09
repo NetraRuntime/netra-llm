@@ -228,6 +228,33 @@ def peek_data(dataset: str = CORPUS, text_field: str = "text", n: int = 12):
     )
 
 
+SFT_DIR = f"{DATA}/datasets/sft-funcall-4096"
+
+
+# To include the gated xlam dataset: `modal secret create hf-token HF_TOKEN=hf_...`
+# then add `secrets=[modal.Secret.from_name("hf-token")]` below (xlam is skipped with a
+# warning when HF_TOKEN is absent).
+@app.function(cpu=32.0, memory=65536, timeout=2 * 3600, volumes={DATA: vol})
+def prepare_sft(max_length: int = 4096, num_proc: int = 32, force: bool = False):
+    """Build the function-calling SFT corpus (hermes + xlam-if-token + Id-functioncall),
+    pre-tokenized with multi-turn assistant-only labels, saved to the Volume."""
+    import os
+    import subprocess
+
+    _ensure_repo()
+    if not force and os.path.exists(f"{SFT_DIR}/dataset_dict.json"):
+        print(f"[skip] SFT corpus already at {SFT_DIR}")
+        return
+    subprocess.run(
+        ["python", "-u", "dllm/tools/prepare_sft_funcall.py",
+         "--tokenizer_path", A2D_DIR, "--output_dir", SFT_DIR,
+         "--max_length", str(max_length), "--num_proc", str(num_proc)],
+        cwd=REMOTE,
+        check=True,
+    )
+    vol.commit()
+
+
 # Materialize + tokenize + pack the 3-source corpus with maximum parallelism:
 # each source's stream is split into ~nproc/3 shard-groups read by separate processes
 # (process-parallel from_generator), docs are shuffled (so packed sequences mix EN/ID/code),
