@@ -156,17 +156,25 @@ class A2DQwen3_5TextModel(Qwen3_5TextModel):
         else:
             text_position_ids = None
 
-        # ---- NEW CODE: bidirectional, padding-only mask for FULL-ATTENTION layers ----
-        if attention_mask is None:
-            attention_mask = torch.ones(
-                inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long
-            )
-        full_attn_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
-        # linear-attention layers: 2D padding mask only; their bidirectionality (when
-        # config.bidirectional_linear) comes from the dual-scan in A2DQwen3_5GatedDeltaNet,
-        # not from this mask.
-        linear_attn_mask = self._update_linear_attn_mask(attention_mask, past_key_values)
-        # -----------------------------------------------------------------------------
+        # ---- Mask handling for full-attention vs linear (delta-net) layers ----
+        # MDLM: a 2D/None padding mask -> full bidirectional (padding-only) mask for full-attn.
+        # BD3LM: the trainer/sampler passes a 4D block-causal mask -> use it as-is for full-attn
+        #        (sdpa honors a boolean 4D mask). The recurrent delta-net can't consume a 4D
+        #        mask, so it runs causally with no padding mask (BD3LM's clean-context conditioning
+        #        reaches the noised half through the full-attn layers, M1-style).
+        if attention_mask is not None and getattr(attention_mask, "ndim", 0) == 4:
+            full_attn_mask = attention_mask
+            linear_attn_mask = None
+        else:
+            if attention_mask is None:
+                attention_mask = torch.ones(
+                    inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long
+                )
+            full_attn_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
+            # linear-attention layers: 2D padding mask only; their bidirectionality (when
+            # config.bidirectional_linear) comes from the dual-scan in A2DQwen3_5GatedDeltaNet.
+            linear_attn_mask = self._update_linear_attn_mask(attention_mask, past_key_values)
+        # -----------------------------------------------------------------------
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
