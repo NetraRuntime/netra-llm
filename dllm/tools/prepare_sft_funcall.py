@@ -152,7 +152,12 @@ def _tokenize_with_spans(messages, tokenizer, supervise):
     one full template render via regex + fast-tokenizer offset mapping — template-
     agnostic, no prefix re-renders. The assistant header and any <think> scaffold stay
     masked; content + end-of-turn token supervise. Returns (ids, labels) or None."""
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    try:
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+    except Exception:
+        return None  # template refuses this window (e.g. no user turn)
     blocks = list(_ASSISTANT_BLOCK_RE.finditer(text))
     a_msg_idx = [i for i, m in enumerate(messages) if m["role"] == "assistant"]
     if len(blocks) != len(a_msg_idx):
@@ -187,8 +192,11 @@ def _shrink_user_middle(messages, tokenizer, max_length, min_keep_chars=512):
     if user_idx is None:
         return None
     for _ in range(12):
-        if len(_template_ids(tokenizer, msgs, False)) <= max_length:
-            return msgs
+        try:
+            if len(_template_ids(tokenizer, msgs, False)) <= max_length:
+                return msgs
+        except Exception:
+            return None  # window the template refuses to render (e.g. no user turn)
         c = msgs[user_idx]["content"]
         if len(c) < min_keep_chars * 2:
             return None
@@ -264,7 +272,11 @@ def multiturn_sft_map_fn(batch, *, tokenizer, max_length):
     oversized single turns are middle-truncated."""
     out_ids, out_labels = [], []
     for messages in batch["messages"]:
-        for ids, labels in windowed_examples(messages, tokenizer, max_length):
+        try:
+            windows = windowed_examples(messages, tokenizer, max_length)
+        except Exception:
+            continue  # one degenerate conversation must never kill the whole job
+        for ids, labels in windows:
             out_ids.append(ids)
             out_labels.append(labels)
     return {"input_ids": out_ids, "labels": out_labels}
