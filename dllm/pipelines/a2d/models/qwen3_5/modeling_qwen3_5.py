@@ -16,6 +16,20 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     apply_mask_to_padding_states,
 )
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+from transformers.models.qwen3_5 import modeling_qwen3_5 as _stock_qwen3_5
+
+
+def _fused_rmsnorm_forward(self, x):
+    # Fused, bit-faithful replacement for the stock Qwen3_5RMSNorm.forward: same op order
+    # (fp32 normalize, (1 + weight) multiply in fp32, downcast last) in ONE kernel instead
+    # of ~5 + 3 dtype copies. RMSNorm runs 81x per forward pass (x2 under grad ckpt) and
+    # accounted for ~46% of all aten::copy_ calls in the step profile.
+    return F.rms_norm(
+        x.float(), (x.shape[-1],), 1.0 + self.weight.float(), self.eps
+    ).type_as(x)
+
+
+_stock_qwen3_5.Qwen3_5RMSNorm.forward = _fused_rmsnorm_forward
 
 
 class A2DQwen3_5TextConfig(Qwen3_5TextConfig):

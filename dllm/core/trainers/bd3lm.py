@@ -135,7 +135,9 @@ class BD3LMTrainer(MDLMTrainer):
         t = self.time_epsilon + (1 - self.time_epsilon) * torch.rand(
             b, device=input_ids.device
         )  # [b]
-        p_mask = 1.0 - self.scheduler(t).unsqueeze(1).expand(b, l)  # [b, l]
+        # _alpha (not __call__/alpha): t is in [eps, 1) by construction; the public wrapper's
+        # torch.all range check forces a GPU->CPU sync every micro-batch.
+        p_mask = 1.0 - self.scheduler._alpha(t).unsqueeze(1).expand(b, l)  # [b, l]
 
         # === 2. Apply stochastic masking ===
         # Tokens are masked independently according to p_mask(t).
@@ -180,13 +182,21 @@ class BD3LMTrainer(MDLMTrainer):
         ):
             from torch.nn.attention.flex_attention import create_block_mask
 
-            attention_mask = create_block_mask(
-                partial(_create_bd3lm_attention_mask, block_size=self.block_size, n=l),
-                B=None,
-                H=None,
-                Q_LEN=l * 2,
-                KV_LEN=l * 2,
-            )
+            # Cache like the sdpa branch: create_block_mask is ~5-50ms of eager vmap per call.
+            cache_key = (l, self.block_size, str(input_ids.device))
+            if getattr(self, "_flex_mask_cache_key", None) == cache_key:
+                attention_mask = self._flex_mask_cache
+            else:
+                attention_mask = create_block_mask(
+                    partial(_create_bd3lm_attention_mask, block_size=self.block_size, n=l),
+                    B=None,
+                    H=None,
+                    Q_LEN=l * 2,
+                    KV_LEN=l * 2,
+                    device=input_ids.device,
+                )
+                self._flex_mask_cache = attention_mask
+                self._flex_mask_cache_key = cache_key
         else:
             raise NotImplementedError
 
@@ -199,11 +209,13 @@ class BD3LMTrainer(MDLMTrainer):
             input_ids=concat_input_ids,
             attention_mask=attention_mask,
             position_ids=concat_position_ids,
+            # lm_head over the noised half only — the clean half's logits are never used by
+            # the loss (and currently get zero grad), but cost a [b, l, vocab] matmul fwd+bwd.
+            # Must be a slice: an int l would keep the LAST l positions (the clean half).
+            logits_to_keep=slice(0, l),
         )
         outputs = self._postprocess_outputs(outputs)
-        logits = outputs.logits
-
-        logits = logits[:, :l]  # we only care about the first half for computing loss
+        logits = outputs.logits  # [b, l, V] — already the noised half
 
         # === 4. Compute per-token loss weights ===
         # Depending on the configuration, weights may depend on timestep t
@@ -213,16 +225,21 @@ class BD3LMTrainer(MDLMTrainer):
         )
 
         # === 5. Compute weighted cross-entropy ===
-        # Sanity check: ensure input_ids and labels match at valid positions
-        assert (
-            input_ids[maskable_mask] == labels[maskable_mask]
-        ).all(), "Mismatch between input_ids and labels at valid positions"
+        # Sanity check (first batch only — it validates collator-invariant data, and the
+        # masked_select + .all() force 3 GPU->CPU syncs per micro-batch if run every step)
+        if not getattr(self, "_inputs_validated", False):
+            assert (
+                input_ids[maskable_mask] == labels[maskable_mask]
+            ).all(), "Mismatch between input_ids and labels at valid positions"
+            self._inputs_validated = True
 
+        # Flat [b*l, V] layout: the transposed [b, V, l] form forces an ~8GB fp32 contiguous
+        # copy inside CE plus the slow strided-softmax kernel (softmax dim is not innermost).
         token_nll = F.cross_entropy(
-            logits.transpose(1, 2),  # [b, V, l]
-            input_ids,  # [b, l]
-            reduction="none",  # [b, l]
-        )
+            logits.reshape(-1, logits.size(-1)),
+            input_ids.reshape(-1),
+            reduction="none",
+        ).view(b, l)
         token_nll = token_nll * loss_weights * masked_mask.to(token_nll.dtype)  # [b, l]
 
         self.meter.update(

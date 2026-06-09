@@ -57,7 +57,16 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
     # B200 = Blackwell (sm_100) → needs a CUDA 12.8 torch build; cu124 has no Blackwell kernels.
-    .pip_install("torch", index_url="https://download.pytorch.org/whl/cu128")
+    # Pinned 2.10.0: causal-conv1d prebuilt wheels top out at torch 2.10 (2.11 would force a
+    # source build, and debian_slim has no nvcc).
+    .pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu128")
+    # causal-conv1d CUDA kernels (depthwise causal conv in the delta-net): the torch fallback
+    # cost ~400ms/step at 4B. Direct wheel URL (verified to contain sm_100 SASS) so setup.py
+    # never runs; flips transformers' fast conv path on import alone.
+    .pip_install(
+        "causal_conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/"
+        "v1.6.2.post1/causal_conv1d-1.6.2.post1%2Bcu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
+    )
     # dllm runtime deps (minus deepspeed/bitsandbytes — not needed for single-GPU full FT).
     .pip_install(
         "accelerate",
@@ -374,6 +383,7 @@ def train_one(
     grad_accum: int = 2,
     max_steps: int = 10,
     block_size: int = 32,
+    grad_ckpt: bool = True,
     model_dir: str = A2D_DIR,
     run_name: str = "bd3lm-4b-one",
 ):
@@ -386,7 +396,7 @@ def train_one(
         f"--dataset_args '{dataset}' --load_preprocessed_data True --streaming False "
         f"--max_length {max_length} --block_size {block_size} "
         "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation sdpa "
-        "--gradient_checkpointing True "
+        f"--gradient_checkpointing {grad_ckpt} --optim adamw_torch_fused "
         "--dataloader_num_workers 8 --dataloader_prefetch_factor 4 "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
         f"--max_steps {max_steps} --learning_rate 1e-4 --logging_steps 1 "
