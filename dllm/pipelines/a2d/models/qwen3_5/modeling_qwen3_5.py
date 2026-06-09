@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 import transformers
@@ -8,19 +9,124 @@ from transformers.cache_utils import Cache
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5ForCausalLM,
+    Qwen3_5GatedDeltaNet,
     Qwen3_5ModelOutputWithPast,
     Qwen3_5PreTrainedModel,
     Qwen3_5TextModel,
+    apply_mask_to_padding_states,
 )
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
 
 class A2DQwen3_5TextConfig(Qwen3_5TextConfig):
     model_type = "a2d-qwen3_5"  # <- NEW model_type
+    bidirectional_linear: bool = False  # <- NEW: enable bidirectional linear-attn
+
+
+class A2DQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+    """Bidirectional gated delta-net for masked diffusion (no KV/conv cache).
+
+    Approach A: run the causal delta-rule scan left->right and right->left with
+    SHARED weights, sum the outputs; use a non-causal (centered) depthwise conv.
+    Zero new parameters; gated by ``config.bidirectional_linear`` so the disabled
+    path exactly reproduces the stock causal layer.
+    """
+
+    def __init__(self, config, layer_idx):
+        super().__init__(config, layer_idx)
+        self.config = config  # stock __init__ does not retain config
+
+    def _causal_conv(self, mixed_qkv):
+        # Stock causal short conv: pad k-1 on the left, crop to T.
+        # mixed_qkv: [b, conv_dim, T]
+        T = mixed_qkv.shape[-1]
+        return F.silu(self.conv1d(mixed_qkv)[..., :T])
+
+    def _noncausal_conv(self, mixed_qkv):
+        # Non-causal (centered) depthwise conv so each position sees both sides.
+        # mixed_qkv: [b, conv_dim, T]
+        T = mixed_qkv.shape[-1]
+        k = self.conv_kernel_size
+        out = F.conv1d(
+            mixed_qkv,
+            self.conv1d.weight,
+            self.conv1d.bias,
+            padding=k // 2,
+            groups=self.conv_dim,
+        )[..., :T]
+        return F.silu(out)
+
+    def _scan(self, query, key, value, g, beta):
+        core, _ = self.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g=g,
+            beta=beta,
+            initial_state=None,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+        )
+        return core  # [b, T, heads, head_v_dim]
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        bidirectional = getattr(self.config, "bidirectional_linear", False)
+
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        b, seq_len, _ = hidden_states.shape
+
+        mixed_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # [b, conv_dim, T]
+        z = self.in_proj_z(hidden_states).reshape(b, seq_len, -1, self.head_v_dim)
+        beta = self.in_proj_b(hidden_states).sigmoid()  # [b, T, num_v]
+        # If the model is loaded in fp16, without the .float() here, A might be -inf
+        g = -self.A_log.float().exp() * F.softplus(
+            self.in_proj_a(hidden_states).float() + self.dt_bias
+        )  # [b, T, num_v]
+
+        # Conv: centered (non-causal) when bidirectional, else stock causal so the
+        # disabled path reproduces the stock layer exactly.
+        if bidirectional:
+            mixed_qkv = self._noncausal_conv(mixed_qkv)
+        else:
+            mixed_qkv = self._causal_conv(mixed_qkv)
+        mixed_qkv = mixed_qkv.transpose(1, 2)  # [b, T, conv_dim]
+
+        query, key, value = torch.split(
+            mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
+        )
+        query = query.reshape(b, seq_len, -1, self.head_k_dim)
+        key = key.reshape(b, seq_len, -1, self.head_k_dim)
+        value = value.reshape(b, seq_len, -1, self.head_v_dim)
+        if self.num_v_heads // self.num_k_heads > 1:
+            rep = self.num_v_heads // self.num_k_heads
+            query = query.repeat_interleave(rep, dim=2)
+            key = key.repeat_interleave(rep, dim=2)
+
+        out_fwd = self._scan(query, key, value, g, beta)
+        if bidirectional:
+            flip = lambda t: torch.flip(t, dims=[1])
+            out_bwd = self._scan(flip(query), flip(key), flip(value), flip(g), flip(beta))
+            core_attn_out = out_fwd + torch.flip(out_bwd, dims=[1])
+        else:
+            core_attn_out = out_fwd
+
+        core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
+        z = z.reshape(-1, self.head_v_dim)
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(b, seq_len, -1)
+        return self.out_proj(core_attn_out)
 
 
 class A2DQwen3_5TextModel(Qwen3_5TextModel):
     config_class = A2DQwen3_5TextConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        if getattr(config, "bidirectional_linear", False):
+            for i, layer in enumerate(self.layers):
+                if config.layer_types[i] == "linear_attention":
+                    layer.linear_attn = A2DQwen3_5GatedDeltaNet(config, layer_idx=i)
+            self.post_init()
 
     def forward(
         self,
