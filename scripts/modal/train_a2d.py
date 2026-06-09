@@ -263,6 +263,30 @@ def prepare_sft(max_length: int = 4096, num_proc: int = 32, idfc_cap: int = 0,
     vol.commit()
 
 
+@app.function(cpu=16.0, memory=32768, timeout=1800, volumes={DATA: vol})
+def count_sft_tokens(path: str = SFT_DIR):
+    """Exact token census of a pre-tokenized SFT corpus: total vs supervised tokens."""
+    from datasets import load_from_disk
+
+    ds = load_from_disk(path)
+    for split, d in ds.items():
+        stats = d.map(
+            lambda b: {
+                "n": [len(x) for x in b["input_ids"]],
+                "s": [sum(1 for v in lab if v != -100) for lab in b["labels"]],
+            },
+            batched=True,
+            num_proc=16,
+            remove_columns=d.column_names,
+        )
+        total, sup = sum(stats["n"]), sum(stats["s"])
+        print(
+            f"[census] {split}: rows={len(d):,}  total_tokens={total/1e6:.1f}M  "
+            f"supervised={sup/1e6:.1f}M ({100*sup/total:.1f}%)  avg_len={total/len(d):.0f}",
+            flush=True,
+        )
+
+
 # Materialize + tokenize + pack the 3-source corpus with maximum parallelism:
 # each source's stream is split into ~nproc/3 shard-groups read by separate processes
 # (process-parallel from_generator), docs are shuffled (so packed sequences mix EN/ID/code),
