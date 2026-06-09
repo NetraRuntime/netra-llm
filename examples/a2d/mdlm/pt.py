@@ -126,7 +126,9 @@ def train():
             padding=True,
         ),
     )
-    trainer.train()
+    trainer.train(
+        resume_from_checkpoint=getattr(training_args, "resume_from_checkpoint", None)
+    )
     trainer.save_model(os.path.join(training_args.output_dir, "checkpoint-final"))
     trainer.processing_class.save_pretrained(
         os.path.join(training_args.output_dir, "checkpoint-final")
