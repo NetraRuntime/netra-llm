@@ -183,18 +183,29 @@ def train(
     vol.commit()
 
 
+PEEK_SCRIPT = r'''
+import sys, dllm
+dataset, text_field, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+ds = dllm.data.load_pt_dataset(dataset, streaming=True)
+it = iter(ds["train"])
+for i in range(n):
+    print(f"[{i}] {next(it)[text_field][:140]!r}", flush=True)
+'''
+
+
 @app.function(cpu=4.0, memory=16384, timeout=1800, volumes={DATA: vol})
 def peek_data(dataset: str = BILINGUAL, text_field: str = "text", n: int = 12):
-    """Stream a few examples from a (possibly interleaved) mix to verify it on Modal's
-    fast network — e.g. confirm EN and ID actually alternate before spending GPU."""
-    _ensure_repo()
-    import dllm
+    """Stream a few examples from a (possibly interleaved) mix to verify it on Modal's fast
+    network — confirm EN and ID alternate before spending GPU. Runs as a subprocess so dllm
+    imports in a fresh process after the runtime clone (PYTHONPATH was cached empty at startup)."""
+    import subprocess
 
-    ds = dllm.data.load_pt_dataset(dataset, streaming=True)
-    it = iter(ds["train"])
-    for i in range(n):
-        t = next(it)[text_field]
-        print(f"[{i}] {t[:140]!r}", flush=True)
+    _ensure_repo()
+    subprocess.run(
+        ["python", "-u", "-c", PEEK_SCRIPT, dataset, text_field, str(n)],
+        cwd=REMOTE,
+        check=True,
+    )
 
 
 @app.function(gpu=f"B200:{N_GPU}", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
