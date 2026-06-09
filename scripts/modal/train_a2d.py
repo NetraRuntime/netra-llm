@@ -320,6 +320,7 @@ def train_multi(
     attn: str = "sdpa",
     num_workers: int = 4,  # per rank; 8 ranks x (1 main + 4 workers) fits the 64-core cap
     grad_ckpt: bool = True,
+    optim: str = "adamw_torch_fused",  # fused step over 4B params beats the foreach default
     preprocessed: bool = True,
     model_dir: str = A2D_DIR,
     run_name: str = "bd3lm-en-id",
@@ -353,6 +354,7 @@ def train_multi(
         f"--max_length {max_length} --block_size {block_size} "
         f"--dtype bfloat16 --bf16 True --fp16 False --attn_implementation {attn} "
         f"--gradient_checkpointing {grad_ckpt} --ddp_find_unused_parameters False "
+        f"--optim {optim} "
         f"--dataloader_num_workers {num_workers} --dataloader_prefetch_factor 4 "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
         f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
