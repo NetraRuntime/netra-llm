@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import transformers
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5ForCausalLM,
@@ -144,9 +144,16 @@ class A2DQwen3_5TextModel(Qwen3_5TextModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
+        # Cache support is needed for BD3LM's KV-cached block decoding (sampler).
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+
         # mRoPE position ids (text only): replicate the stock 4-way expand.
         if position_ids is None:
-            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+            past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+            position_ids = torch.arange(
+                past_seen, past_seen + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
             position_ids = position_ids.view(1, 1, -1).expand(4, inputs_embeds.shape[0], -1)
         elif position_ids.ndim == 2:
             position_ids = position_ids[None, ...].expand(4, position_ids.shape[0], -1)
@@ -190,13 +197,16 @@ class A2DQwen3_5TextModel(Qwen3_5TextModel):
                 position_embeddings=position_embeddings,
                 attention_mask=layer_mask,
                 position_ids=text_position_ids,
-                past_key_values=None,        # diffusion: no incremental cache
-                use_cache=False,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
                 **kwargs,
             )
 
         hidden_states = self.norm(hidden_states)
-        return Qwen3_5ModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=None)
+        return Qwen3_5ModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values if use_cache else None,
+        )
 
 
 class A2DQwen3_5LMHeadModel(Qwen3_5ForCausalLM):
