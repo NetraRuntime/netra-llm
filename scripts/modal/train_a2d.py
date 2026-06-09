@@ -197,7 +197,7 @@ def peek_data(dataset: str = BILINGUAL, text_field: str = "text", n: int = 12):
         print(f"[{i}] {t[:140]!r}", flush=True)
 
 
-@app.function(gpu=f"B200:{N_GPU}", timeout=80 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
+@app.function(gpu=f"B200:{N_GPU}", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
 def train_multi(
     dataset: str = BILINGUAL,
     text_field: str = "text",
