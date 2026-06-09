@@ -63,8 +63,10 @@ image = (
         {
             "PYTHONPATH": REMOTE,
             "HF_HOME": f"{DATA}/hf_cache",
-            "HF_HUB_ENABLE_HF_TRANSFER": "1",
             "TOKENIZERS_PARALLELISM": "false",
+            # the gated delta-net torch fallback runs in fp32 across 18 layers; reduce
+            # allocator fragmentation so big transient tensors fit.
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         }
     )
 )
@@ -128,7 +130,7 @@ def train(
     text_field: str = "Text",
     insert_eos: bool = False,
     max_length: int = 512,
-    batch: int = 16,
+    batch: int = 8,
     grad_accum: int = 1,
     epochs: int = 10,
     lr: float = 1e-4,
@@ -155,6 +157,7 @@ def train(
         f"--dataset_args '{dataset}' --text_field '{text_field}' --insert_eos {insert_eos} "
         f"--max_length {max_length} "
         "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation sdpa "
+        "--gradient_checkpointing True "
         f"{lora_flag} "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
         f"--num_train_epochs {epochs} --learning_rate {lr} --logging_steps 5 "
@@ -185,7 +188,7 @@ def main(
     dataset: str = "Trelis/tiny-shakespeare",
     text_field: str = "Text",
     max_length: int = 512,
-    batch: int = 16,
+    batch: int = 8,
     epochs: int = 10,
     run_name: str = "m1-tinyshake",
 ):
