@@ -238,8 +238,9 @@ SFT_DIR = f"{DATA}/datasets/sft-funcall-4096"
     volumes={DATA: vol},
     secrets=[modal.Secret.from_name("hf-token")],  # HF_TOKEN for the gated xlam dataset
 )
-def prepare_sft(max_length: int = 4096, num_proc: int = 32, idfc_cap: int = 0,
-                chat_cap: int = 20000, force: bool = False):
+def prepare_sft(max_length: int = 4096, num_proc: int = 32, idfc_cap: int = 100000,
+                smoltalk_cap: int = 15000, bactrian_cap: int = 0, xlam_cap: int = 0,
+                hermes_repeat: int = 2, force: bool = False):
     """Build the function-calling SFT corpus (hermes + xlam-if-token + Id-functioncall
     + Kolosal benchmark gold if uploaded), pre-tokenized with multi-turn assistant-only
     labels, saved to the Volume.
@@ -255,7 +256,9 @@ def prepare_sft(max_length: int = 4096, num_proc: int = 32, idfc_cap: int = 0,
         ["python", "-u", "dllm/tools/prepare_sft_funcall.py",
          "--tokenizer_path", A2D_DIR, "--output_dir", SFT_DIR,
          "--max_length", str(max_length), "--num_proc", str(num_proc),
-         "--idfc_cap", str(idfc_cap), "--chat_cap", str(chat_cap),
+         "--idfc_cap", str(idfc_cap), "--smoltalk_cap", str(smoltalk_cap),
+         "--bactrian_cap", str(bactrian_cap), "--xlam_cap", str(xlam_cap),
+         "--hermes_repeat", str(hermes_repeat),
          "--extra_json", f"{DATA}/datasets/raw/kolosal-bench.json"],
         cwd=REMOTE,
         check=True,

@@ -301,17 +301,20 @@ def main():
     p.add_argument("--max_length", type=int, default=4096)
     p.add_argument("--num_proc", type=int, default=32)
     p.add_argument("--test_size", type=int, default=500)
-    p.add_argument("--xlam_cap", type=int, default=30000)
+    p.add_argument("--xlam_cap", type=int, default=0, help="0 = all")
+    p.add_argument("--hermes_repeat", type=int, default=2,
+                   help="oversample factor for the (small, high-value) multi-turn agentic set")
     p.add_argument("--idfc_cap", type=int, default=0, help="cap Id-functioncall rows (0 = all)")
     p.add_argument("--extra_json", default="", help="Kolosal benchmark-eval JSON path (optional)")
-    p.add_argument("--chat_cap", type=int, default=20000,
-                   help="general-chat rows per language: smoltalk (EN) + Bactrian-X id (ID); 0 disables")
+    p.add_argument("--smoltalk_cap", type=int, default=15000, help="EN chat rows; -1 disables")
+    p.add_argument("--bactrian_cap", type=int, default=0, help="ID chat rows; 0 = all, -1 disables")
     args = p.parse_args()
 
     tok = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
     assert tok.chat_template, "tokenizer has no chat template"
 
     parts = []
+    hermes_parts = []
 
     # --- Hermes (all configs are agentic/structured-output relevant) ---
     for cfg in (
@@ -328,8 +331,11 @@ def main():
             num_proc=args.num_proc,
             desc=f"hermes:{cfg}",
         ).filter(lambda r: r["messages"] is not None, num_proc=args.num_proc)
-        parts.append(ds)
+        hermes_parts.append(ds)
         print(f"[sft-prep] hermes/{cfg}: {len(ds):,} rows", flush=True)
+    parts.extend(hermes_parts * max(1, args.hermes_repeat))
+    if args.hermes_repeat > 1:
+        print(f"[sft-prep] hermes oversampled x{args.hermes_repeat}", flush=True)
 
     # --- xlam (gated; best-effort) ---
     if os.environ.get("HF_TOKEN"):
@@ -337,7 +343,7 @@ def main():
             ds = datasets.load_dataset(
                 "Salesforce/xlam-function-calling-60k", split="train", token=os.environ["HF_TOKEN"]
             )
-            if len(ds) > args.xlam_cap:
+            if args.xlam_cap and len(ds) > args.xlam_cap:
                 ds = ds.shuffle(seed=42).select(range(args.xlam_cap))
             ds = ds.map(
                 lambda r: {"messages": xlam_to_messages(r), "source": "xlam"},
@@ -367,9 +373,10 @@ def main():
 
     # --- General chat, balanced EN/ID (keeps the model conversational, not a pure
     #     tool-call reflex; ID side also reinforces Indonesian instruction following) ---
-    if args.chat_cap:
+    if args.smoltalk_cap >= 0:
         ds = datasets.load_dataset("HuggingFaceTB/smoltalk", "all", split="train")
-        ds = ds.shuffle(seed=42).select(range(min(args.chat_cap, len(ds))))
+        if args.smoltalk_cap:
+            ds = ds.shuffle(seed=42).select(range(min(args.smoltalk_cap, len(ds))))
         ds = ds.map(
             lambda r: {"messages": [dict(m) for m in r["messages"]], "source": "smoltalk-en"},
             remove_columns=ds.column_names,
@@ -381,12 +388,14 @@ def main():
 
         # Bactrian-X is a legacy script-based dataset (unsupported in datasets>=4):
         # load the Indonesian split's raw JSON directly.
+    if args.bactrian_cap >= 0:
         ds = datasets.load_dataset(
             "json",
             data_files="https://huggingface.co/datasets/MBZUAI/Bactrian-X/resolve/main/data/id.json.gz",
             split="train",
         )
-        ds = ds.shuffle(seed=42).select(range(min(args.chat_cap, len(ds))))
+        if args.bactrian_cap:
+            ds = ds.shuffle(seed=42).select(range(min(args.bactrian_cap, len(ds))))
         ds = ds.map(
             lambda r: {"messages": bactrian_to_messages(r), "source": "bactrian-id"},
             remove_columns=ds.column_names,
