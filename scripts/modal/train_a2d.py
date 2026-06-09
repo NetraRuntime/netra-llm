@@ -47,6 +47,11 @@ CORPUS = (
     "+HuggingFaceFW/fineweb-2[name:ind_Latn,train:620000,weight:1]"
     "+OpenCoder-LLM/opc-fineweb-code-corpus[train:420000,weight:1]"
 )
+# Pre-tokenized/packed corpus on the Volume (built once by prepare_data). Streaming + DDP was the
+# training bottleneck: accelerate dispatch_batches makes rank 0 stream+tokenize for all 8 GPUs,
+# and [train:N] take() collapses the stream to 1 shard (no worker parallelism) -> ~25s/step.
+# A map-style on-disk dataset gets true per-rank sharding + parallel dataloader workers.
+PREP_DIR = f"{DATA}/datasets/pt-en-id-code-1024"
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -211,9 +216,88 @@ def peek_data(dataset: str = CORPUS, text_field: str = "text", n: int = 12):
     )
 
 
+# Materialize + tokenize + pack the 3-source corpus with maximum parallelism:
+# each source's stream is split into ~nproc/3 shard-groups read by separate processes
+# (process-parallel from_generator), docs are shuffled (so packed sequences mix EN/ID/code),
+# then tokenize_and_group packs to fixed max_len rows {input_ids, labels} and save_to_disk.
+PREP_SCRIPT = r'''
+import sys, math, time, functools
+import dllm
+from datasets import Dataset, DatasetDict, load_dataset
+
+tok_dir, out_dir, max_len, nproc = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+
+SOURCES = [  # (repo, config, docs to take) — ~250M tokens each at avg doc lengths
+    ("HuggingFaceFW/fineweb-edu", "sample-10BT", 240_000),
+    ("HuggingFaceFW/fineweb-2", "ind_Latn", 620_000),
+    ("OpenCoder-LLM/opc-fineweb-code-corpus", None, 420_000),
+]
+
+def gen(specs):
+    from datasets import load_dataset
+    for repo, cfg, k, idx, take_n in specs:
+        ds = load_dataset(repo, name=cfg, split="train", streaming=True)
+        it = ds.shard(num_shards=k, index=idx) if k > 1 else ds
+        n = 0
+        for ex in it:
+            if n >= take_n:
+                break
+            t = ex.get("text")
+            if t:
+                yield {"text": t}
+                n += 1
+
+specs = []
+per_source_par = max(1, nproc // len(SOURCES))
+for repo, cfg, total in SOURCES:
+    ds = load_dataset(repo, name=cfg, split="train", streaming=True)
+    k = max(1, min(per_source_par, ds.num_shards))
+    per = math.ceil(total / k)
+    specs += [(repo, cfg, k, i, per) for i in range(k)]
+print(f"[prep] {len(specs)} parallel stream shards across {len(SOURCES)} sources", flush=True)
+
+t0 = time.time()
+try:
+    texts = Dataset.from_generator(gen, gen_kwargs={"specs": specs}, num_proc=min(len(specs), nproc))
+except Exception as e:
+    print(f"[prep] parallel from_generator failed ({type(e).__name__}: {e}); single-proc fallback", flush=True)
+    texts = Dataset.from_generator(gen, gen_kwargs={"specs": specs})
+print(f"[prep] materialized {len(texts):,} docs in {time.time()-t0:.0f}s", flush=True)
+
+texts = texts.shuffle(seed=42)  # doc-level shuffle BEFORE packing -> sequences mix sources
+tok = dllm.utils.get_tokenizer(model_name_or_path=tok_dir)
+ds = texts.map(
+    functools.partial(dllm.utils.tokenize_and_group, tokenizer=tok, text_field="text",
+                      seq_length=max_len, insert_eos=True, drop_tail=True),
+    batched=True, remove_columns=texts.column_names, num_proc=nproc, desc="tokenize+pack",
+)
+DatasetDict({"train": ds}).save_to_disk(out_dir, num_proc=min(16, nproc))
+print(f"[prep] DONE rows={len(ds):,} (~{len(ds)*max_len/1e6:.0f}M tokens) -> {out_dir}", flush=True)
+'''
+
+
+@app.function(cpu=64.0, memory=131072, timeout=4 * 3600, volumes={DATA: vol})
+def prepare_data(max_length: int = 1024, num_proc: int = 64, force: bool = False):
+    """One-time corpus build: parallel-stream the 3 sources, tokenize+pack on 64 cores,
+    save to the Volume. Training then reads local Arrow (memory-mapped) for all epochs."""
+    import os
+    import subprocess
+
+    _ensure_repo()
+    if not force and os.path.exists(f"{PREP_DIR}/dataset_dict.json"):
+        print(f"[skip] preprocessed corpus already at {PREP_DIR}")
+        return
+    subprocess.run(
+        ["python", "-u", "-c", PREP_SCRIPT, A2D_DIR, PREP_DIR, str(max_length), str(num_proc)],
+        cwd=REMOTE,
+        check=True,
+    )
+    vol.commit()
+
+
 @app.function(gpu=f"B200:{N_GPU}", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
 def train_multi(
-    dataset: str = CORPUS,
+    dataset: str = PREP_DIR,
     text_field: str = "text",
     max_length: int = 1024,
     batch: int = 8,
@@ -224,10 +308,13 @@ def train_multi(
     save_steps: float = 0.05,
     attn: str = "sdpa",
     num_workers: int = 8,
+    grad_ckpt: bool = True,
+    preprocessed: bool = True,
     model_dir: str = A2D_DIR,
     run_name: str = "bd3lm-en-id",
 ):
-    """Multi-GPU (N_GPU x B200) BD3LM training on a streamed bilingual corpus, DDP via accelerate."""
+    """Multi-GPU (N_GPU x B200) BD3LM training, DDP via accelerate. Default: the pre-tokenized
+    map-style corpus on the Volume (true per-rank sharding + parallel dataloader workers)."""
     import os
 
     import torch
@@ -243,16 +330,18 @@ def train_multi(
             resume = f"--resume_from_checkpoint '{out}/{latest}'"
             print(f"[resume] from {out}/{latest}", flush=True)
 
+    if preprocessed:
+        data_flags = f"--dataset_args '{dataset}' --load_preprocessed_data True --streaming False "
+    else:
+        data_flags = f"--dataset_args '{dataset}' --insert_eos True --streaming True "
     _sh(
         f"accelerate launch --config_file scripts/accelerate_configs/ddp.yaml --num_processes {nproc} "
         "examples/a2d/bd3lm/pt.py "
         f"--model_name_or_path '{model_dir}' "
-        f"--dataset_args '{dataset}' --text_field '{text_field}' --insert_eos True --streaming True "
+        f"{data_flags}--text_field '{text_field}' "
         f"--max_length {max_length} --block_size {block_size} "
         f"--dtype bfloat16 --bf16 True --fp16 False --attn_implementation {attn} "
-        "--gradient_checkpointing True "
-        # parallel data loading: streaming + on-the-fly tokenization of the 3-way mix starves the
-        # GPUs at num_workers=0; prefetch with worker processes so the GPUs aren't data-bound.
+        f"--gradient_checkpointing {grad_ckpt} --ddp_find_unused_parameters False "
         f"--dataloader_num_workers {num_workers} --dataloader_prefetch_factor 4 "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
         f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
