@@ -71,12 +71,12 @@ image = (
     )
     # transformers main = the build that ships qwen3_5.
     .run_commands("pip install --upgrade 'git+https://github.com/huggingface/transformers.git'")
-    # flash-linear-attention = Triton gated-delta-net kernels (delta-net fast path; the torch
-    # fallback is ~23s/step at 4B). Its gated chunk_bwd kernel is buggy on Hopper(H100)+Triton>=3.4
-    # and needs tilelang; on Blackwell(B200) we install both and test. Best-effort: the model falls
-    # back to torch if fla can't import, so the build never fails.
+    # flash-linear-attention = Triton gated-delta-net kernels (delta-net fast path; torch fallback
+    # is ~23s/step at 4B). Do NOT install tilelang: fla 0.5.0 routes gated chunk_bwd to the tilelang
+    # backend when it's present, and tilelang can't find a CUDA toolkit on this image ("No CUDA
+    # available"). The fla Triton-kernel bug is Hopper(H100)-specific; on Blackwell(B200) the Triton
+    # backend is correct, so fla-only gives the fast path. Best-effort import → torch fallback.
     .run_commands("pip install flash-linear-attention || echo 'fla unavailable'")
-    .run_commands("pip install tilelang || echo 'tilelang unavailable'")
     .env(
         {
             "PYTHONPATH": REMOTE,
