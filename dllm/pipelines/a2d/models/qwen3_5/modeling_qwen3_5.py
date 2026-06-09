@@ -120,6 +120,7 @@ class A2DQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
 class A2DQwen3_5TextModel(Qwen3_5TextModel):
     config_class = A2DQwen3_5TextConfig
+    _supports_flex_attn = True
 
     def __init__(self, config):
         super().__init__(config)
@@ -164,12 +165,14 @@ class A2DQwen3_5TextModel(Qwen3_5TextModel):
             text_position_ids = None
 
         # ---- Mask handling for full-attention vs linear (delta-net) layers ----
-        # MDLM: a 2D/None padding mask -> full bidirectional (padding-only) mask for full-attn.
-        # BD3LM: the trainer/sampler passes a 4D block-causal mask -> use it as-is for full-attn
-        #        (sdpa honors a boolean 4D mask). The recurrent delta-net can't consume a 4D
-        #        mask, so it runs causally with no padding mask (BD3LM's clean-context conditioning
-        #        reaches the noised half through the full-attn layers, M1-style).
-        if attention_mask is not None and getattr(attention_mask, "ndim", 0) == 4:
+        # 2D tensor / None  -> padding-only bidirectional mask for full-attn (MDLM-style).
+        # 4D tensor         -> BD3LM block-causal mask for sdpa (passed by trainer/sampler).
+        # BlockMask object  -> BD3LM block-causal mask for flex_attention (block-sparse, fast).
+        # In the block-mask cases the recurrent delta-net can't consume the mask, so it runs
+        # causally with no padding mask (BD3LM conditioning reaches the noised half via full-attn).
+        if attention_mask is not None and not (
+            isinstance(attention_mask, torch.Tensor) and attention_mask.ndim == 2
+        ):
             full_attn_mask = attention_mask
             linear_attn_mask = None
         else:
@@ -212,6 +215,9 @@ class A2DQwen3_5TextModel(Qwen3_5TextModel):
 class A2DQwen3_5LMHeadModel(Qwen3_5ForCausalLM):
     config_class = A2DQwen3_5TextConfig
     config: A2DQwen3_5TextConfig
+    # qwen3_5 doesn't declare flex support, but the attention interface resolves it and BD3LM's
+    # block-causal mask is far cheaper as a block-sparse flex_attention than a dense sdpa mask.
+    _supports_flex_attn = True
 
     def __init__(self, config):
         Qwen3_5PreTrainedModel.__init__(self, config)

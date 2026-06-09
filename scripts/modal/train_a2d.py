@@ -247,7 +247,8 @@ def train_multi(
         f"--model_name_or_path '{model_dir}' "
         f"--dataset_args '{dataset}' --text_field '{text_field}' --insert_eos True --streaming True "
         f"--max_length {max_length} --block_size {block_size} "
-        "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation sdpa "
+        # flex_attention: BD3LM's block-causal mask as a block-sparse kernel (vs dense-mask sdpa).
+        "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation flex_attention "
         "--gradient_checkpointing True "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
         f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
@@ -265,7 +266,7 @@ def train_multi(
 RAW_SAMPLE = r'''
 import sys, dllm
 ckpt, steps, mnt, temp, blk = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5])
-model = dllm.utils.get_model(model_name_or_path=ckpt, dtype="bfloat16").eval()
+model = dllm.utils.get_model(model_name_or_path=ckpt, dtype="bfloat16", attn_implementation="sdpa").eval()
 tok = dllm.utils.get_tokenizer(model_name_or_path=ckpt)
 sampler = dllm.core.samplers.BD3LMSampler(model=model, tokenizer=tok)
 cfg = dllm.core.samplers.BD3LMSamplerConfig(
