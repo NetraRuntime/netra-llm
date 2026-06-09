@@ -39,6 +39,9 @@ class MDLMTrainer(transformers.Trainer):
         *pargs,
         **kwargs,
     ):
+        # transformers>=5 renamed Trainer's `tokenizer` arg to `processing_class`.
+        if "tokenizer" in kwargs and "processing_class" not in kwargs:
+            kwargs["processing_class"] = kwargs.pop("tokenizer")
         super().__init__(args=args, *pargs, **kwargs)
 
         if not (0.0 < args.time_epsilon < 1.0):
@@ -92,7 +95,11 @@ class MDLMTrainer(transformers.Trainer):
         """Compute loss weights given timestep t and other arguments."""
         b, l = inputs["input_ids"].shape
         if self.loss_weight_type == "scheduler":
-            loss_weights = self.scheduler.weight(t).unsqueeze(1).repeat(1, l)
+            # Inline scheduler.weight() via the private hooks: the public alpha()/
+            # alpha_derivative() run torch.all range checks = 3 GPU->CPU syncs per call;
+            # t is in [eps, 1) by construction. expand (view) instead of repeat (copy).
+            w = -self.scheduler._alpha_derivative(t) / (1 - self.scheduler._alpha(t) + 1e-6)
+            loss_weights = w.unsqueeze(1).expand(b, l)
         elif self.loss_weight_type == "uniform":
             loss_weights = torch.ones_like(inputs["input_ids"])
         else:

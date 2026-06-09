@@ -137,9 +137,54 @@ def load_pt_dataset(
     if streaming:
         logger.info("Loading dataset in streaming mode.")
         parts = [_load_one_streaming_spec(raw) for raw in specs]
-        merged = parts[0]
-        for p in parts[1:]:
-            merged = _merge_iterabledatasetdicts(merged, p)
+
+        # Optional weighted interleave: if any spec carries a [weight:W] selector, interleave
+        # the train streams by those (normalized) probabilities instead of chaining them.
+        # Chaining (the default) means later datasets are never reached under --max_steps,
+        # which silently drops e.g. a second language from a multilingual mix.
+        spec_weights = []
+        for raw in specs:
+            _, kvs = parse_spec(raw)
+            w = kvs.get("weight")
+            spec_weights.append(float(w) if w is not None else None)
+
+        if len(parts) > 1 and any(w is not None for w in spec_weights):
+            from datasets import interleave_datasets
+
+            probs = [w if w is not None else 0.0 for w in spec_weights]
+            total = sum(probs)
+            probs = (
+                [p / total for p in probs]
+                if total > 0
+                else [1.0 / len(parts)] * len(parts)
+            )
+            train_streams = [p["train"] for p in parts]
+            # Align to common columns so differing dataset schemas don't break interleave.
+            try:
+                common = set(train_streams[0].column_names or [])
+                for ts in train_streams[1:]:
+                    common &= set(ts.column_names or [])
+                if common:
+                    train_streams = [
+                        ts.select_columns(sorted(common)) for ts in train_streams
+                    ]
+            except Exception:
+                pass
+            logger.info(f"Interleaving {len(parts)} streams with probabilities {probs}.")
+            merged = IterableDatasetDict(
+                {
+                    "train": interleave_datasets(
+                        train_streams,
+                        probabilities=probs,
+                        stopping_strategy="all_exhausted",
+                        seed=42,
+                    )
+                }
+            )
+        else:
+            merged = parts[0]
+            for p in parts[1:]:
+                merged = _merge_iterabledatasetdicts(merged, p)
         # repeat streaming dataset infinitely
         merged = IterableDatasetDict(
             {k: (v.repeat(None) if k == "train" else v) for k, v in merged.items()}
