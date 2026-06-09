@@ -137,33 +137,137 @@ def kolosal_bench_to_rows(path):
     return rows
 
 
-def multiturn_sft_map_fn(row, *, tokenizer, max_length):
-    """Tokenize messages with assistant-only labels across ALL turns.
+# assistant turn in a ChatML render: header (+ optional <think> scaffold) then content
+# up to <|im_end|>. The Qwen template renders the <think> scaffold only on the final
+# assistant turn, so prefix-based span math is NOT stable — we instead locate spans in
+# the single full render and map char offsets -> token indices.
+_ASSISTANT_BLOCK_RE = re.compile(
+    r"<\|im_start\|>assistant\n(?:<think>.*?</think>\n*)?(.*?<\|im_end\|>)", re.S
+)
 
-    ChatML-family templates are prefix-stable (each turn appends a self-contained
-    <|im_start|>...<|im_end|> segment), so per-turn token spans are computed from
-    incremental prefix lengths. The assistant *header* (everything add_generation_prompt
-    would append, including any <think> scaffold) stays masked; content + end-of-turn
-    supervise.
-    """
-    messages = row["messages"]
-    full = _template_ids(tokenizer, messages, False)
-    if len(full) > max_length:
-        return {"input_ids": [], "labels": []}
-    labels = [-100] * len(full)
-    for i, msg in enumerate(messages):
-        if msg["role"] != "assistant":
-            continue
-        upto_prev = _template_ids(tokenizer, messages[:i], True)  # prefix + assistant header
-        upto_here = _template_ids(tokenizer, messages[: i + 1], False)
-        start, end = len(upto_prev), len(upto_here)
-        # hard prefix-stability verification (drop the row if the template misbehaves)
-        if not (0 < start < end <= len(full)) or full[:end] != upto_here:
-            return {"input_ids": [], "labels": []}
-        labels[start:end] = full[start:end]
+
+def _tokenize_with_spans(messages, tokenizer, supervise):
+    """Tokenize a conversation with assistant-only labels on the message indices in
+    `supervise` (other assistant turns act as pure context). Spans are located in the
+    one full template render via regex + fast-tokenizer offset mapping — template-
+    agnostic, no prefix re-renders. The assistant header and any <think> scaffold stay
+    masked; content + end-of-turn token supervise. Returns (ids, labels) or None."""
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    blocks = list(_ASSISTANT_BLOCK_RE.finditer(text))
+    a_msg_idx = [i for i, m in enumerate(messages) if m["role"] == "assistant"]
+    if len(blocks) != len(a_msg_idx):
+        return None  # render doesn't match message structure; drop
+    char_spans = [
+        blocks[k].span(1) for k, mi in enumerate(a_msg_idx) if mi in supervise
+    ]
+    if not char_spans:
+        return None
+    enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    ids, offsets = enc["input_ids"], enc["offset_mapping"]
+    labels = [-100] * len(ids)
+    for cs, ce in char_spans:
+        for t, (ts, te) in enumerate(offsets):
+            if ts >= cs and te <= ce and ts < te:
+                labels[t] = ids[t]
     if all(l == -100 for l in labels):
-        return {"input_ids": [], "labels": []}
-    return {"input_ids": full, "labels": labels}
+        return None
+    return ids, labels
+
+
+def _shrink_user_middle(messages, tokenizer, max_length, min_keep_chars=512):
+    """For a minimal window that still exceeds max_length: middle-truncate its longest
+    user turn (instructions tend to sit at the top, the question at the bottom, so keep
+    both ends). Returns a fitted messages list or None."""
+    msgs = [dict(m) for m in messages]
+    user_idx = max(
+        (i for i, m in enumerate(msgs) if m["role"] in ("user", "tool")),
+        key=lambda i: len(msgs[i]["content"]),
+        default=None,
+    )
+    if user_idx is None:
+        return None
+    for _ in range(12):
+        if len(_template_ids(tokenizer, msgs, False)) <= max_length:
+            return msgs
+        c = msgs[user_idx]["content"]
+        if len(c) < min_keep_chars * 2:
+            return None
+        keep = int(len(c) * 0.35)
+        msgs[user_idx]["content"] = c[:keep] + "\n[...]\n" + c[-keep:]
+    return None
+
+
+def windowed_examples(messages, tokenizer, max_length):
+    """Split an over-long conversation into windows such that EVERY assistant turn is
+    supervised exactly once and every window fits max_length. Each window keeps the
+    system message (tool definitions) + a contiguous slice of turns: context grows
+    backward first (max conditioning for the first supervised turn), then the window
+    extends forward to supervise more turns in the same pass."""
+    sys_msgs = messages[:1] if (messages and messages[0]["role"] == "system") else []
+    body = messages[len(sys_msgs):]
+    a_idx = [i for i, m in enumerate(body) if m["role"] == "assistant"]
+    if not a_idx:
+        return []
+
+    def fits(msgs):
+        try:
+            return len(_template_ids(tokenizer, msgs, False)) <= max_length
+        except Exception:
+            return False  # e.g. Qwen template refuses windows with no user turn
+
+    # fast path: whole conversation fits -> one window, all assistant turns supervised
+    if fits(sys_msgs + body):
+        out = _tokenize_with_spans(
+            sys_msgs + body, tokenizer, {len(sys_msgs) + i for i in a_idx}
+        )
+        return [out] if out else []
+
+    examples = []
+    done = -1  # last body index already covered by a window's supervision
+    while True:
+        nxt = next((i for i in a_idx if i > done), None)
+        if nxt is None:
+            break
+        # minimal valid window: the immediately-preceding turn + the assistant turn
+        # (the template requires a user turn; never render an answer with no question)
+        start_c = nxt - 1 if nxt > 0 else nxt
+        if not fits(sys_msgs + body[start_c : nxt + 1]):
+            # too big even minimal: middle-truncate the preceding user/tool turn
+            shrunk = _shrink_user_middle(
+                sys_msgs + body[start_c : nxt + 1], tokenizer, max_length
+            )
+            if shrunk is not None:
+                out = _tokenize_with_spans(shrunk, tokenizer, {len(shrunk) - 1})
+                if out:
+                    examples.append(out)
+            done = nxt
+            continue
+        # grow context backward from the minimal window (windows fit by construction)
+        c = start_c
+        while c - 1 > -1 and fits(sys_msgs + body[c - 1 : nxt + 1]):
+            c -= 1
+        # extend forward while it fits (supervise more turns in the same window)
+        e = nxt
+        while e + 1 < len(body) and fits(sys_msgs + body[c : e + 2]):
+            e += 1
+        sup = {len(sys_msgs) + (i - c) for i in a_idx if nxt <= i <= e}
+        out = _tokenize_with_spans(sys_msgs + body[c : e + 1], tokenizer, sup)
+        if out:
+            examples.append(out)
+        done = e
+    return examples
+
+
+def multiturn_sft_map_fn(batch, *, tokenizer, max_length):
+    """Batched explode-map: each conversation yields >=0 windowed training rows.
+    Nothing over-long is dropped wholesale — long conversations are windowed and
+    oversized single turns are middle-truncated."""
+    out_ids, out_labels = [], []
+    for messages in batch["messages"]:
+        for ids, labels in windowed_examples(messages, tokenizer, max_length):
+            out_ids.append(ids)
+            out_labels.append(labels)
+    return {"input_ids": out_ids, "labels": out_labels}
 
 
 def main():
@@ -251,8 +355,11 @@ def main():
         fn_kwargs={"tokenizer": tok, "max_length": args.max_length},
         remove_columns=merged.column_names,
         num_proc=args.num_proc,
-        desc="tokenize+mask",
+        batched=True,  # explode-map: long conversations window into multiple rows
+        batch_size=64,
+        desc="tokenize+mask+window",
     ).filter(lambda r: len(r["input_ids"]) > 0, num_proc=args.num_proc)
+    print(f"[sft-prep] {len(merged):,} conversations -> {len(tokenized):,} windowed rows", flush=True)
 
     n_test = min(args.test_size, len(tokenized) // 20)
     split = tokenized.train_test_split(test_size=n_test, seed=42)
