@@ -32,10 +32,11 @@ GIT_URL = "https://github.com/NetraRuntime/netra-llm.git"
 GIT_REF = "a2d-qwen3_5-bidirectional"
 REMOTE = "/root/netra-llm"
 DATA = "/data"
-BASE_MODEL = "Qwen/Qwen3.5-0.8B-Base"
-TEXT_DIR = f"{DATA}/qwen3_5-0.8b-text"
-A2D_DIR = f"{DATA}/a2d/qwen3_5-0.8b"
-N_GPU = 8  # H100 count for the multi-GPU bilingual run (train_multi)
+BASE_MODEL = "Qwen/Qwen3.5-4B-Base"   # real bilingual-run base (0.8B was the gate, already validated)
+_SLUG = "qwen3_5-4b"
+TEXT_DIR = f"{DATA}/{_SLUG}-text"
+A2D_DIR = f"{DATA}/a2d/{_SLUG}"
+N_GPU = 8  # B200 count for the multi-GPU bilingual run (train_multi)
 
 # Balanced bilingual mix (English + Bahasa Indonesia). The [weight:W] selectors trigger
 # interleaving in dllm's loader so neither language is starved under --max_steps.
@@ -47,8 +48,8 @@ BILINGUAL = (
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
-    # CUDA-matched torch (H100 = sm_90) — must use the cu124 wheel, not the CPU default.
-    .pip_install("torch==2.6.0", index_url="https://download.pytorch.org/whl/cu124")
+    # B200 = Blackwell (sm_100) → needs a CUDA 12.8 torch build; cu124 has no Blackwell kernels.
+    .pip_install("torch", index_url="https://download.pytorch.org/whl/cu128")
     # dllm runtime deps (minus deepspeed/bitsandbytes — not needed for single-GPU full FT).
     .pip_install(
         "accelerate",
@@ -67,6 +68,11 @@ image = (
     )
     # transformers main = the build that ships qwen3_5.
     .run_commands("pip install --upgrade 'git+https://github.com/huggingface/transformers.git'")
+    # flash-linear-attention = Triton kernels for the gated delta-net scan (big speedup at
+    # 4B/100k steps). Best-effort: if it can't install, the model falls back to the torch path.
+    .run_commands(
+        "pip install flash-linear-attention || echo 'fla unavailable; using torch delta-net fallback'"
+    )
     .env(
         {
             "PYTHONPATH": REMOTE,
@@ -109,7 +115,7 @@ def _sh(cmd: str):
     subprocess.run(cmd, shell=True, check=True, cwd=REMOTE)
 
 
-@app.function(cpu=8.0, memory=49152, timeout=3 * 3600, volumes={DATA: vol})
+@app.function(cpu=8.0, memory=98304, timeout=4 * 3600, volumes={DATA: vol})
 def extract_and_convert(force: bool = False):
     """M0 + convert: text-backbone extraction and AR->diffusion conversion (CPU is fine)."""
     import os
@@ -181,9 +187,9 @@ def train(
 def peek_data(dataset: str = BILINGUAL, text_field: str = "text", n: int = 12):
     """Stream a few examples from a (possibly interleaved) mix to verify it on Modal's
     fast network — e.g. confirm EN and ID actually alternate before spending GPU."""
+    _ensure_repo()
     import dllm
 
-    _ensure_repo()
     ds = dllm.data.load_pt_dataset(dataset, streaming=True)
     it = iter(ds["train"])
     for i in range(n):
@@ -191,14 +197,14 @@ def peek_data(dataset: str = BILINGUAL, text_field: str = "text", n: int = 12):
         print(f"[{i}] {t[:140]!r}", flush=True)
 
 
-@app.function(gpu=f"H100:{N_GPU}", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
+@app.function(gpu=f"B200:{N_GPU}", timeout=80 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
 def train_multi(
     dataset: str = BILINGUAL,
     text_field: str = "text",
     max_length: int = 1024,
     batch: int = 8,
     grad_accum: int = 2,
-    max_steps: int = 20000,
+    max_steps: int = 100000,
     lr: float = 1e-4,
     run_name: str = "m1-en-id",
 ):
