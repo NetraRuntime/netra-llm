@@ -156,18 +156,24 @@ class BD3LMTrainer(MDLMTrainer):
 
         # [TODO]: others like flash attention 2
         if self.accelerator.unwrap_model(model).config._attn_implementation == "sdpa":
-            attention_mask = _create_bd3lm_attention_mask(
-                b=None,
-                h=None,
-                q_idx=torch.arange(l * 2)[:, None],
-                kv_idx=torch.arange(l * 2)[None, :],
-                block_size=self.block_size,
-                n=l,
-            )
-            attention_mask = (
-                attention_mask.unsqueeze(0).unsqueeze(0).expand(1, 1, 2 * l, 2 * l)
-            )
-            attention_mask = attention_mask.to(input_ids.device)
+            # The mask depends only on (l, block_size): build it ON DEVICE once and cache —
+            # rebuilding [2l,2l] on CPU + H2D upload every micro-batch costs real CPU time,
+            # which serializes badly when 8 DDP ranks share the host's cores.
+            cache_key = (l, str(input_ids.device))
+            if getattr(self, "_attn_mask_cache_key", None) == cache_key:
+                attention_mask = self._attn_mask_cache
+            else:
+                idx = torch.arange(l * 2, device=input_ids.device)
+                attention_mask = _create_bd3lm_attention_mask(
+                    b=None,
+                    h=None,
+                    q_idx=idx[:, None],
+                    kv_idx=idx[None, :],
+                    block_size=self.block_size,
+                    n=l,
+                ).unsqueeze(0).unsqueeze(0)  # [1, 1, 2l, 2l]
+                self._attn_mask_cache = attention_mask
+                self._attn_mask_cache_key = cache_key
         elif (
             self.accelerator.unwrap_model(model).config._attn_implementation
             == "flex_attention"

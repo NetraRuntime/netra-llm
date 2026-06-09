@@ -87,6 +87,9 @@ image = (
             "PYTHONPATH": REMOTE,
             "HF_HOME": f"{DATA}/hf_cache",
             "TOKENIZERS_PARALLELISM": "false",
+            # accelerate/torchrun pin each rank to OMP_NUM_THREADS=1 when unset; with 8 ranks
+            # of CPU-heavy orchestration (hybrid model = many kernel launches) that starves GPUs.
+            "OMP_NUM_THREADS": "8",
             # the gated delta-net torch fallback runs in fp32 across 18 layers; reduce
             # allocator fragmentation so big transient tensors fit.
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
@@ -295,7 +298,12 @@ def prepare_data(max_length: int = 1024, num_proc: int = 64, force: bool = False
     vol.commit()
 
 
-@app.function(gpu=f"B200:{N_GPU}", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
+# cpu/memory: a Modal GPU container only RESERVES a small CPU share unless requested.
+# 1 rank is fine; 8 ranks + dataloader workers contend for that share and the GPUs starve
+# waiting on kernel-launch threads (measured: 3.7s/step at 1 GPU vs 27-60s/step at 8 GPUs
+# with compute=1.34s and NCCL=738GB/s both healthy).
+@app.function(gpu=f"B200:{N_GPU}", cpu=96.0, memory=393216, timeout=24 * 3600,
+              volumes={DATA: vol}, secrets=[wandb_secret])
 def train_multi(
     dataset: str = PREP_DIR,
     text_field: str = "text",
