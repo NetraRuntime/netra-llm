@@ -4,9 +4,7 @@ Runs the full pipeline for adapting **Qwen3.5-0.8B-Base** into a masked-diffusio
 model on a free Colab **T4 (16 GB)**. See the design spec and plan under
 `docs/superpowers/`.
 
-**Repo:** `NetraRuntime/netra-llm` (private), branch `a2d-qwen3_5-bidirectional`. Cloning a
-private repo on Colab needs a GitHub token with `repo` scope — add it to **Colab Secrets**
-(🔑 left sidebar) as `GH_TOKEN`, then enable notebook access. Cell 1 reads it.
+**Repo:** `NetraRuntime/netra-llm` (public), branch `a2d-qwen3_5-bidirectional`.
 
 > Memory note: full FT of 0.8B won't fit a T4 — this uses **QLoRA (4-bit) + fp16 + sdpa**,
 > batch 1 × grad-accum 8, `max_length 128`, gradient checkpointing. If you OOM, drop
@@ -15,14 +13,8 @@ private repo on Colab needs a GitHub token with `repo` scope — add it to **Col
 ---
 
 ## Cell 1 — clone, env, Drive
-```python
-# Private repo: store a GitHub token (scope: repo) in Colab Secrets as GH_TOKEN first.
-from google.colab import userdata
-import os
-os.environ["GH_TOKEN"] = userdata.get("GH_TOKEN")
-```
 ```bash
-!git clone -b a2d-qwen3_5-bidirectional https://$GH_TOKEN@github.com/NetraRuntime/netra-llm.git
+!git clone -b a2d-qwen3_5-bidirectional https://github.com/NetraRuntime/netra-llm.git
 %cd netra-llm
 !bash scripts/colab/setup.sh          # installs dllm + transformers(main, has qwen3_5) + bitsandbytes
 ```
