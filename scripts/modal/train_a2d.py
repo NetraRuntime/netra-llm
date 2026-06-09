@@ -215,7 +215,7 @@ def train_multi(
     max_length: int = 1024,
     batch: int = 8,
     grad_accum: int = 2,
-    max_steps: int = 100000,
+    max_steps: int = 20000,  # ~2.6B tokens at eff-batch 128 x len 1024 (dllm OpenWebText PT scale)
     lr: float = 1e-4,
     run_name: str = "m1-en-id",
 ):
