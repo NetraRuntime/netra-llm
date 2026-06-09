@@ -68,11 +68,9 @@ image = (
     )
     # transformers main = the build that ships qwen3_5.
     .run_commands("pip install --upgrade 'git+https://github.com/huggingface/transformers.git'")
-    # flash-linear-attention = Triton kernels for the gated delta-net scan (big speedup at
-    # 4B/100k steps). Best-effort: if it can't install, the model falls back to the torch path.
-    .run_commands(
-        "pip install flash-linear-attention || echo 'fla unavailable; using torch delta-net fallback'"
-    )
+    # NOTE: flash-linear-attention is intentionally NOT installed — its gated-delta-net backward
+    # kernel is buggy on Hopper (H100) with Triton>=3.4 (needs tilelang). The model uses the
+    # pure-torch delta-net fallback (correct everywhere, slower). Revisit fla+tilelang for B200 speed.
     .env(
         {
             "PYTHONPATH": REMOTE,
