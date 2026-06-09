@@ -231,10 +231,13 @@ def peek_data(dataset: str = CORPUS, text_field: str = "text", n: int = 12):
 SFT_DIR = f"{DATA}/datasets/sft-funcall-4096"
 
 
-# To include the gated xlam dataset: `modal secret create hf-token HF_TOKEN=hf_...`
-# then add `secrets=[modal.Secret.from_name("hf-token")]` below (xlam is skipped with a
-# warning when HF_TOKEN is absent).
-@app.function(cpu=32.0, memory=65536, timeout=2 * 3600, volumes={DATA: vol})
+@app.function(
+    cpu=32.0,
+    memory=65536,
+    timeout=2 * 3600,
+    volumes={DATA: vol},
+    secrets=[modal.Secret.from_name("hf-token")],  # HF_TOKEN for the gated xlam dataset
+)
 def prepare_sft(max_length: int = 4096, num_proc: int = 32, idfc_cap: int = 0, force: bool = False):
     """Build the function-calling SFT corpus (hermes + xlam-if-token + Id-functioncall
     + Kolosal benchmark gold if uploaded), pre-tokenized with multi-turn assistant-only
