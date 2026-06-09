@@ -118,6 +118,25 @@ def _template_ids(tokenizer, messages, add_generation_prompt):
     return out["input_ids"] if hasattr(out, "keys") else out
 
 
+def kolosal_bench_to_rows(path):
+    """Kolosal benchmark-eval dump -> single-turn rows. Targets are the GOLD
+    expected_answer (not the benchmarked model's output). Summarize/translate/
+    paraphrase over Indonesian customer-service conversations."""
+    with open(path) as f:
+        data = json.load(f)
+    rows = []
+    for conv in data.get("conversations", []):
+        for chat in conv.get("chats", []):
+            inp = chat.get("input") or {}
+            q, a = (inp.get("question") or "").strip(), (inp.get("expected_answer") or "").strip()
+            if chat.get("status") != "success" or not q or not a:
+                continue
+            rows.append(
+                {"messages": [{"role": "user", "content": q}, {"role": "assistant", "content": a}]}
+            )
+    return rows
+
+
 def multiturn_sft_map_fn(row, *, tokenizer, max_length):
     """Tokenize messages with assistant-only labels across ALL turns.
 
@@ -155,6 +174,8 @@ def main():
     p.add_argument("--num_proc", type=int, default=32)
     p.add_argument("--test_size", type=int, default=500)
     p.add_argument("--xlam_cap", type=int, default=30000)
+    p.add_argument("--idfc_cap", type=int, default=0, help="cap Id-functioncall rows (0 = all)")
+    p.add_argument("--extra_json", default="", help="Kolosal benchmark-eval JSON path (optional)")
     args = p.parse_args()
 
     tok = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
@@ -203,6 +224,8 @@ def main():
 
     # --- Indonesian function calling ---
     ds = datasets.load_dataset("jaeyong2/Id-functioncall", split="train")
+    if args.idfc_cap and len(ds) > args.idfc_cap:
+        ds = ds.shuffle(seed=42).select(range(args.idfc_cap))
     ds = ds.map(
         lambda r: {"messages": idfc_to_messages(r)},
         remove_columns=ds.column_names,
@@ -211,6 +234,14 @@ def main():
     ).filter(lambda r: r["messages"] is not None, num_proc=args.num_proc)
     parts.append(ds)
     print(f"[sft-prep] id-functioncall: {len(ds):,} rows", flush=True)
+
+    # --- Kolosal benchmark gold (summarize/translate/paraphrase, ID customer-service) ---
+    if args.extra_json and os.path.exists(args.extra_json):
+        rows = kolosal_bench_to_rows(args.extra_json)
+        parts.append(datasets.Dataset.from_list(rows))
+        print(f"[sft-prep] kolosal-bench: {len(rows):,} rows", flush=True)
+    elif args.extra_json:
+        print(f"[sft-prep] WARN extra_json not found: {args.extra_json}", flush=True)
 
     merged = datasets.concatenate_datasets(parts).shuffle(seed=42)
     print(f"[sft-prep] merged: {len(merged):,} rows; tokenizing...", flush=True)
