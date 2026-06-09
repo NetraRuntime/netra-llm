@@ -130,7 +130,7 @@ def train(
     max_length: int = 512,
     batch: int = 16,
     grad_accum: int = 1,
-    epochs: float = 10,
+    epochs: int = 10,
     lr: float = 1e-4,
     lora: bool = False,
     run_name: str = "m1-tinyshake",
@@ -186,7 +186,7 @@ def main(
     text_field: str = "Text",
     max_length: int = 512,
     batch: int = 16,
-    epochs: float = 10,
+    epochs: int = 10,
     run_name: str = "m1-tinyshake",
 ):
     """extract+convert (cached on the Volume) then train, end to end."""
