@@ -353,6 +353,69 @@ def train_multi(
     vol.commit()
 
 
+@app.function(gpu="B200", timeout=2 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
+def train_one(
+    dataset: str = PREP_DIR,
+    max_length: int = 1024,
+    batch: int = 8,
+    grad_accum: int = 2,
+    max_steps: int = 10,
+    block_size: int = 32,
+    model_dir: str = A2D_DIR,
+    run_name: str = "bd3lm-4b-one",
+):
+    """The REAL trainer (pt.py) on ONE B200 with the preprocessed corpus — no DDP.
+    Bisects: if this hits ~compute speed, the multi-GPU gap is DDP/NCCL."""
+    _ensure_repo()
+    _sh(
+        "python -u examples/a2d/bd3lm/pt.py "
+        f"--model_name_or_path '{model_dir}' "
+        f"--dataset_args '{dataset}' --load_preprocessed_data True --streaming False "
+        f"--max_length {max_length} --block_size {block_size} "
+        "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation sdpa "
+        "--gradient_checkpointing True "
+        "--dataloader_num_workers 8 --dataloader_prefetch_factor 4 "
+        f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
+        f"--max_steps {max_steps} --learning_rate 1e-4 --logging_steps 1 "
+        "--eval_strategy no --report_to none "
+        f"--run_name '{run_name}' --save_strategy no "
+        f"--output_dir '{DATA}/runs/{run_name}'"
+    )
+
+
+NCCL_SCRIPT = r'''
+import time, torch, torch.distributed as dist
+dist.init_process_group("nccl")
+r = dist.get_rank()
+torch.cuda.set_device(r)
+x = torch.ones(2 * 1024**3, dtype=torch.bfloat16, device="cuda")  # 4 GB payload
+for i in range(4):
+    dist.barrier(); torch.cuda.synchronize(); t = time.time()
+    dist.all_reduce(x)
+    torch.cuda.synchronize(); dt = time.time() - t
+    if r == 0:
+        bus = 2 * (7 / 8) * 4.0 / dt  # ring busbw, GB/s
+        print(f"[allreduce 4GB bf16] iter{i}: {dt:.3f}s  busbw ~{bus:.0f} GB/s", flush=True)
+dist.destroy_process_group()
+'''
+
+
+@app.function(gpu=f"B200:{N_GPU}", timeout=1800, volumes={DATA: vol})
+def nccl_bench():
+    """Measure 8-GPU all-reduce bandwidth + NCCL topology (NVLink vs degraded path).
+    Real DDP syncs ~8GB of bf16 grads per step — if busbw is low, that's the stall."""
+    import subprocess
+
+    with open("/tmp/nccl_bench.py", "w") as f:
+        f.write(NCCL_SCRIPT)
+    subprocess.run(
+        "NCCL_DEBUG=INFO torchrun --nproc_per_node 8 /tmp/nccl_bench.py 2>&1 | "
+        "grep -E 'allreduce|busbw|NVLS|P2P|SHM|NET/|via|Connected|Channel 00' | head -60",
+        shell=True,
+        check=True,
+    )
+
+
 # Single-GPU BD3LM step microbench + torch.profiler: replicates the training step exactly
 # (bf16, sdpa, optional grad-ckpt, [noised|clean] concat + 4D block mask, fwd+bwd) with NO
 # DDP and NO dataloader — isolates pure compute and names the top CUDA kernels.
