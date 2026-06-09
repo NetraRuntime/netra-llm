@@ -118,6 +118,17 @@ def _template_ids(tokenizer, messages, add_generation_prompt):
     return out["input_ids"] if hasattr(out, "keys") else out
 
 
+def bactrian_to_messages(row):
+    """Bactrian-X {instruction, input, output} -> single-turn chat (Indonesian config)."""
+    instr = (row.get("instruction") or "").strip()
+    inp = (row.get("input") or "").strip()
+    out = (row.get("output") or "").strip()
+    if not instr or not out:
+        return None
+    user = f"{instr}\n\n{inp}" if inp else instr
+    return [{"role": "user", "content": user}, {"role": "assistant", "content": out}]
+
+
 def kolosal_bench_to_rows(path):
     """Kolosal benchmark-eval dump -> single-turn rows. Targets are the GOLD
     expected_answer (not the benchmarked model's output). Summarize/translate/
@@ -292,6 +303,8 @@ def main():
     p.add_argument("--xlam_cap", type=int, default=30000)
     p.add_argument("--idfc_cap", type=int, default=0, help="cap Id-functioncall rows (0 = all)")
     p.add_argument("--extra_json", default="", help="Kolosal benchmark-eval JSON path (optional)")
+    p.add_argument("--chat_cap", type=int, default=20000,
+                   help="general-chat rows per language: smoltalk (EN) + Bactrian-X id (ID); 0 disables")
     args = p.parse_args()
 
     tok = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
@@ -350,6 +363,31 @@ def main():
     ).filter(lambda r: r["messages"] is not None, num_proc=args.num_proc)
     parts.append(ds)
     print(f"[sft-prep] id-functioncall: {len(ds):,} rows", flush=True)
+
+    # --- General chat, balanced EN/ID (keeps the model conversational, not a pure
+    #     tool-call reflex; ID side also reinforces Indonesian instruction following) ---
+    if args.chat_cap:
+        ds = datasets.load_dataset("HuggingFaceTB/smoltalk", "all", split="train")
+        ds = ds.shuffle(seed=42).select(range(min(args.chat_cap, len(ds))))
+        ds = ds.map(
+            lambda r: {"messages": [dict(m) for m in r["messages"]]},
+            remove_columns=ds.column_names,
+            num_proc=args.num_proc,
+            desc="smoltalk",
+        ).filter(lambda r: bool(r["messages"]), num_proc=args.num_proc)
+        parts.append(ds)
+        print(f"[sft-prep] smoltalk (EN chat): {len(ds):,} rows", flush=True)
+
+        ds = datasets.load_dataset("MBZUAI/Bactrian-X", "id", split="train")
+        ds = ds.shuffle(seed=42).select(range(min(args.chat_cap, len(ds))))
+        ds = ds.map(
+            lambda r: {"messages": bactrian_to_messages(r)},
+            remove_columns=ds.column_names,
+            num_proc=args.num_proc,
+            desc="bactrian-id",
+        ).filter(lambda r: r["messages"] is not None, num_proc=args.num_proc)
+        parts.append(ds)
+        print(f"[sft-prep] bactrian-x id (ID chat): {len(ds):,} rows", flush=True)
 
     # --- Kolosal benchmark gold (summarize/translate/paraphrase, ID customer-service) ---
     if args.extra_json and os.path.exists(args.extra_json):
