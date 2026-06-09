@@ -38,11 +38,14 @@ TEXT_DIR = f"{DATA}/{_SLUG}-text"
 A2D_DIR = f"{DATA}/a2d/{_SLUG}"
 N_GPU = 8  # B200 count for the multi-GPU bilingual run (train_multi)
 
-# Balanced bilingual mix (English + Bahasa Indonesia). The [weight:W] selectors trigger
-# interleaving in dllm's loader so neither language is starved under --max_steps.
-BILINGUAL = (
-    "HuggingFaceFW/fineweb-edu[name:sample-10BT,weight:0.5]"
-    "+HuggingFaceFW/fineweb-2[name:ind_Latn,weight:0.5]"
+# Continued-PT corpus: EN + Bahasa Indonesia + code, interleaved 1/3 each via [weight].
+# Code (opc-fineweb-code-corpus, "text" field) adds the structured/JSON/function syntax that
+# transfers to agentic/tool-calling (DAPT). [train:N] caps each source to ~250M unique tokens
+# so the run does several epochs (diffusion benefits from repetition); EN/ID kept at full weight.
+CORPUS = (
+    "HuggingFaceFW/fineweb-edu[name:sample-10BT,train:240000,weight:1]"
+    "+HuggingFaceFW/fineweb-2[name:ind_Latn,train:620000,weight:1]"
+    "+OpenCoder-LLM/opc-fineweb-code-corpus[train:420000,weight:1]"
 )
 
 image = (
@@ -191,7 +194,7 @@ for i in range(n):
 
 
 @app.function(cpu=4.0, memory=16384, timeout=1800, volumes={DATA: vol})
-def peek_data(dataset: str = BILINGUAL, text_field: str = "text", n: int = 12):
+def peek_data(dataset: str = CORPUS, text_field: str = "text", n: int = 12):
     """Stream a few examples from a (possibly interleaved) mix to verify it on Modal's fast
     network — confirm EN and ID alternate before spending GPU. Runs as a subprocess so dllm
     imports in a fresh process after the runtime clone (PYTHONPATH was cached empty at startup)."""
@@ -207,12 +210,12 @@ def peek_data(dataset: str = BILINGUAL, text_field: str = "text", n: int = 12):
 
 @app.function(gpu=f"B200:{N_GPU}", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
 def train_multi(
-    dataset: str = BILINGUAL,
+    dataset: str = CORPUS,
     text_field: str = "text",
     max_length: int = 1024,
     batch: int = 8,
     grad_accum: int = 2,
-    max_steps: int = 20000,  # ~2.6B tokens at eff-batch 128 x len 1024 (dllm OpenWebText PT scale)
+    max_steps: int = 75000,  # eff-batch 128 x 1024 = ~9.8B tok; 1/3 each EN/ID/code (~3.3B, ~13 epochs)
     lr: float = 1e-4,
     block_size: int = 32,
     model_dir: str = A2D_DIR,
