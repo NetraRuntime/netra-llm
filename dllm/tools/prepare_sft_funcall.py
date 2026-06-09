@@ -378,7 +378,13 @@ def main():
         parts.append(ds)
         print(f"[sft-prep] smoltalk (EN chat): {len(ds):,} rows", flush=True)
 
-        ds = datasets.load_dataset("MBZUAI/Bactrian-X", "id", split="train")
+        # Bactrian-X is a legacy script-based dataset (unsupported in datasets>=4):
+        # load the Indonesian split's raw JSON directly.
+        ds = datasets.load_dataset(
+            "json",
+            data_files="https://huggingface.co/datasets/MBZUAI/Bactrian-X/resolve/main/data/id.json.gz",
+            split="train",
+        )
         ds = ds.shuffle(seed=42).select(range(min(args.chat_cap, len(ds))))
         ds = ds.map(
             lambda r: {"messages": bactrian_to_messages(r)},
