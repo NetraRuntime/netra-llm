@@ -328,7 +328,9 @@ def train_multi(
     save_strategy: str = "steps",  # pass "no" for timing smokes
     attn: str = "sdpa",
     num_workers: int = 4,  # per rank; 8 ranks x (1 main + 4 workers) fits the 64-core cap
-    grad_ckpt: bool = True,
+    # ckpt off fits since logits_to_keep + flat-CE freed ~12GB/rank, and saves the recompute:
+    # measured 1.44s/step vs 2.8-3s with ckpt on (1xB200, full fix stack).
+    grad_ckpt: bool = False,
     optim: str = "adamw_torch_fused",  # fused step over 4B params beats the foreach default
     preprocessed: bool = True,
     model_dir: str = A2D_DIR,
