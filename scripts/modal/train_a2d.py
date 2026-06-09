@@ -385,20 +385,25 @@ def train_one(
     grad_accum: int = 2,
     max_steps: int = 10,
     block_size: int = 32,
-    grad_ckpt: bool = True,
+    grad_ckpt: bool = False,
+    attn: str = "sdpa",
+    compile: bool = False,
     model_dir: str = A2D_DIR,
     run_name: str = "bd3lm-4b-one",
 ):
     """The REAL trainer (pt.py) on ONE B200 with the preprocessed corpus — no DDP.
-    Bisects: if this hits ~compute speed, the multi-GPU gap is DDP/NCCL."""
+    The cheap A/B rig: one flag per run, ~$1 per data point."""
     _ensure_repo()
+    compile_flags = "--torch_compile true --torch_compile_mode default " if compile else ""
     _sh(
+        # regional compilation: compile one decoder layer per flavor, reuse across layers
+        "ACCELERATE_DYNAMO_USE_REGIONAL_COMPILATION=true "
         "python -u examples/a2d/bd3lm/pt.py "
         f"--model_name_or_path '{model_dir}' "
         f"--dataset_args '{dataset}' --load_preprocessed_data True --streaming False "
         f"--max_length {max_length} --block_size {block_size} "
-        "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation sdpa "
-        f"--gradient_checkpointing {grad_ckpt} --optim adamw_torch_fused "
+        f"--dtype bfloat16 --bf16 True --fp16 False --attn_implementation {attn} "
+        f"--gradient_checkpointing {grad_ckpt} --optim adamw_torch_fused {compile_flags}"
         "--dataloader_num_workers 8 --dataloader_prefetch_factor 4 "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
         f"--max_steps {max_steps} --learning_rate 1e-4 --logging_steps 1 "
