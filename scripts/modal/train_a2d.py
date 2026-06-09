@@ -5,12 +5,12 @@ On an H100 (80 GB, native bf16, fast SDPA) we drop every T4 hack: bf16, full
 fine-tuning (no QLoRA), sdpa attention, bigger batch + longer context. Checkpoints
 persist in a Modal Volume; metrics stream to Weights & Biases (rifky/netra-0.8b).
 
-The LOCAL repo is mounted into the container, so your local edits apply without
-re-pushing to GitHub or rebuilding the image.
+Deps are baked into a cached image; the repo is cloned fresh at the start of each
+function, so pushing to the branch is enough to apply code changes (no image rebuild).
 
 ------------------------------------------------------------------------------
-One-time setup (already done if you followed the chat):
-    modal profile activate netragratis        # or prefix every command: MODAL_PROFILE=netragratis ...
+One-time setup:
+    modal profile activate netragratis      # or prefix every command: MODAL_PROFILE=netragratis ...
     modal secret create wandb \
         WANDB_API_KEY=<key> WANDB_ENTITY=rifky WANDB_PROJECT=netra-0.8b
 
@@ -26,15 +26,15 @@ Sample from a checkpoint (the M1 gate):
     MODAL_PROFILE=netragratis modal run scripts/modal/train_a2d.py::sample --run-name m1-tinyshake
 ------------------------------------------------------------------------------
 """
-import pathlib
-
 import modal
 
-# Repo root = two levels up from this file (scripts/modal/train_a2d.py).
-REPO_LOCAL = str(pathlib.Path(__file__).resolve().parents[2])
+GIT_URL = "https://github.com/NetraRuntime/netra-llm.git"
+GIT_REF = "a2d-qwen3_5-bidirectional"
 REMOTE = "/root/netra-llm"
 DATA = "/data"
 BASE_MODEL = "Qwen/Qwen3.5-0.8B-Base"
+TEXT_DIR = f"{DATA}/qwen3_5-0.8b-text"
+A2D_DIR = f"{DATA}/a2d/qwen3_5-0.8b"
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -67,29 +67,29 @@ image = (
             "TOKENIZERS_PARALLELISM": "false",
         }
     )
-    # Mount the LOCAL repo last so edits apply without rebuild. .git/caches excluded.
-    .add_local_dir(
-        REPO_LOCAL,
-        REMOTE,
-        ignore=[
-            "**/.git/**",
-            "**/__pycache__/**",
-            "**/*.pyc",
-            "**/.data/**",
-            "**/.models/**",
-            "lm-evaluation-harness/**",
-            "assets/**",
-            ".venv/**",
-        ],
-    )
 )
 
 app = modal.App("netra-a2d-qwen35", image=image)
 vol = modal.Volume.from_name("netra-a2d", create_if_missing=True)
 wandb_secret = modal.Secret.from_name("wandb")
 
-TEXT_DIR = f"{DATA}/qwen3_5-0.8b-text"
-A2D_DIR = f"{DATA}/a2d/qwen3_5-0.8b"
+
+def _ensure_repo():
+    """Clone (or fast-forward) the branch into the ephemeral container FS at runtime."""
+    import os
+    import subprocess
+
+    if os.path.isdir(f"{REMOTE}/.git"):
+        subprocess.run(
+            f"git -C {REMOTE} fetch --depth 1 origin {GIT_REF} "
+            f"&& git -C {REMOTE} reset --hard FETCH_HEAD",
+            shell=True,
+            check=True,
+        )
+    else:
+        subprocess.run(
+            f"git clone --depth 1 -b {GIT_REF} {GIT_URL} {REMOTE}", shell=True, check=True
+        )
 
 
 def _sh(cmd: str):
@@ -104,6 +104,7 @@ def extract_and_convert(force: bool = False):
     """M0 + convert: text-backbone extraction and AR->diffusion conversion (CPU is fine)."""
     import os
 
+    _ensure_repo()
     if force or not os.path.exists(f"{TEXT_DIR}/config.json"):
         _sh(
             f"python dllm/tools/extract_qwen3_5_text.py "
@@ -121,12 +122,7 @@ def extract_and_convert(force: bool = False):
     vol.commit()
 
 
-@app.function(
-    gpu="H100",
-    timeout=24 * 3600,
-    volumes={DATA: vol},
-    secrets=[wandb_secret],
-)
+@app.function(gpu="H100", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
 def train(
     dataset: str = "Trelis/tiny-shakespeare",
     text_field: str = "Text",
@@ -142,6 +138,7 @@ def train(
     """MDLM continual-pretraining on one H100 (bf16, sdpa, full FT by default)."""
     import os
 
+    _ensure_repo()
     out = f"{DATA}/runs/{run_name}"
     resume = ""
     if os.path.isdir(out):
@@ -172,6 +169,7 @@ def train(
 @app.function(gpu="H100", timeout=3600, volumes={DATA: vol})
 def sample(run_name: str = "m1-tinyshake", steps: int = 128, max_new_tokens: int = 128):
     """Sample from a trained checkpoint (the M1 gate)."""
+    _ensure_repo()
     ckpt = f"{DATA}/runs/{run_name}/checkpoint-final"
     _sh(
         "python -u examples/a2d/mdlm/sample.py "
