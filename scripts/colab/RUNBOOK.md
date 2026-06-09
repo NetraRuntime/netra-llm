@@ -33,16 +33,14 @@ os.makedirs(os.environ["BASE"], exist_ok=True)
     --model_name_or_path "Qwen/Qwen3.5-0.8B-Base" \
     --output_dir "$BASE/qwen3_5-0.8b-text"
 ```
-Sanity-check causal generation (should be grammatical):
-```bash
-!python - <<'PY'
+Sanity-check causal generation (run as a plain Python cell — should be grammatical):
+```python
 import transformers, torch, os
-p=os.environ["BASE"]+"/qwen3_5-0.8b-text"
-m=transformers.AutoModelForCausalLM.from_pretrained(p, dtype=torch.float16).cuda().eval()
-t=transformers.AutoTokenizer.from_pretrained(p)
-ids=t("The capital of France is", return_tensors="pt").input_ids.cuda()
+p = os.environ["BASE"] + "/qwen3_5-0.8b-text"
+m = transformers.AutoModelForCausalLM.from_pretrained(p, dtype=torch.float16).cuda().eval()
+t = transformers.AutoTokenizer.from_pretrained(p)
+ids = t("The capital of France is", return_tensors="pt").input_ids.cuda()
 print(t.decode(m.generate(ids, max_new_tokens=20)[0]))
-PY
 ```
 
 ## Cell 3 — M1: convert to the a2d diffusion model (linear layers stay causal)
