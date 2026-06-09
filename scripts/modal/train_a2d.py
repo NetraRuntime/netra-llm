@@ -313,7 +313,10 @@ def train_multi(
     max_steps: int = 75000,  # eff-batch 128 x 1024 = ~9.8B tok; 1/3 each EN/ID/code (~3.3B, ~13 epochs)
     lr: float = 1e-4,
     block_size: int = 32,
+    # CAUTION: HF treats save_steps floats <1.0 as a ratio of max_steps; exactly 1.0 means
+    # "save EVERY step" (a ~40GB volume write per step — this masqueraded as a perf bug).
     save_steps: float = 0.05,
+    save_strategy: str = "steps",  # pass "no" for timing smokes
     attn: str = "sdpa",
     num_workers: int = 4,  # per rank; 8 ranks x (1 main + 4 workers) fits the 64-core cap
     grad_ckpt: bool = True,
@@ -355,7 +358,7 @@ def train_multi(
         f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
         "--eval_strategy no --report_to wandb "
         f"--run_name '{run_name}' "
-        f"--save_strategy steps --save_steps {save_steps} --save_total_limit 3 --save_only_model False "
+        f"--save_strategy {save_strategy} --save_steps {save_steps} --save_total_limit 3 --save_only_model False "
         f"--output_dir '{out}' {resume}"
     )
     vol.commit()
