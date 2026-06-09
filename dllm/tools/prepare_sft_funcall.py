@@ -306,12 +306,23 @@ def main():
                    help="oversample factor for the (small, high-value) multi-turn agentic set")
     p.add_argument("--idfc_cap", type=int, default=0, help="cap Id-functioncall rows (0 = all)")
     p.add_argument("--extra_json", default="", help="Kolosal benchmark-eval JSON path (optional)")
+    p.add_argument("--save_messages_dir", default="",
+                   help="dump the merged messages corpus here and exit (pre-tokenization stage)")
+    p.add_argument("--messages_dir", default="",
+                   help="skip corpus building; load messages from here (e.g. after persona rewrite)")
     p.add_argument("--smoltalk_cap", type=int, default=15000, help="EN chat rows; -1 disables")
     p.add_argument("--bactrian_cap", type=int, default=0, help="ID chat rows; 0 = all, -1 disables")
     args = p.parse_args()
 
     tok = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
     assert tok.chat_template, "tokenizer has no chat template"
+
+    if args.messages_dir:
+        merged = datasets.load_from_disk(args.messages_dir)
+        if isinstance(merged, datasets.DatasetDict):
+            merged = datasets.concatenate_datasets(list(merged.values()))
+        print(f"[sft-prep] loaded {len(merged):,} messages rows from {args.messages_dir}", flush=True)
+        return _tokenize_and_save(merged, tok, args)
 
     parts = []
     hermes_parts = []
@@ -414,8 +425,15 @@ def main():
         print(f"[sft-prep] WARN extra_json not found: {args.extra_json}", flush=True)
 
     merged = datasets.concatenate_datasets(parts).shuffle(seed=42)
+    if args.save_messages_dir:
+        datasets.DatasetDict({"train": merged}).save_to_disk(args.save_messages_dir)
+        print(f"[sft-prep] messages stage saved: {len(merged):,} rows -> {args.save_messages_dir}", flush=True)
+        return
     print(f"[sft-prep] merged: {len(merged):,} rows; tokenizing...", flush=True)
+    return _tokenize_and_save(merged, tok, args)
 
+
+def _tokenize_and_save(merged, tok, args):
     tokenized = merged.map(
         multiturn_sft_map_fn,
         fn_kwargs={"tokenizer": tok, "max_length": args.max_length},

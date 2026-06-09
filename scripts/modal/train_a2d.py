@@ -82,6 +82,7 @@ image = (
         "lm_eval",
         "trl",
         "hf_transfer",
+        "groq",
     )
     # transformers main = the build that ships qwen3_5.
     .run_commands("pip install --upgrade 'git+https://github.com/huggingface/transformers.git'")
@@ -229,6 +230,8 @@ def peek_data(dataset: str = CORPUS, text_field: str = "text", n: int = 12):
 
 
 SFT_DIR = f"{DATA}/datasets/sft-funcall-4096"
+SFT_MSG_DIR = f"{DATA}/datasets/sft-messages"           # pre-tokenization messages stage
+SFT_MSG_PERSONA_DIR = f"{DATA}/datasets/sft-messages-persona"  # after Groq persona rewrite
 
 
 @app.function(
@@ -240,7 +243,8 @@ SFT_DIR = f"{DATA}/datasets/sft-funcall-4096"
 )
 def prepare_sft(max_length: int = 4096, num_proc: int = 32, idfc_cap: int = 100000,
                 smoltalk_cap: int = 15000, bactrian_cap: int = 0, xlam_cap: int = 0,
-                hermes_repeat: int = 2, force: bool = False):
+                hermes_repeat: int = 2, save_messages: bool = False,
+                from_messages: str = "", force: bool = False):
     """Build the function-calling SFT corpus (hermes + xlam-if-token + Id-functioncall
     + Kolosal benchmark gold if uploaded), pre-tokenized with multi-turn assistant-only
     labels, saved to the Volume.
@@ -252,17 +256,36 @@ def prepare_sft(max_length: int = 4096, num_proc: int = 32, idfc_cap: int = 1000
     if not force and os.path.exists(f"{SFT_DIR}/dataset_dict.json"):
         print(f"[skip] SFT corpus already at {SFT_DIR}")
         return
-    subprocess.run(
-        ["python", "-u", "dllm/tools/prepare_sft_funcall.py",
-         "--tokenizer_path", A2D_DIR, "--output_dir", SFT_DIR,
-         "--max_length", str(max_length), "--num_proc", str(num_proc),
-         "--idfc_cap", str(idfc_cap), "--smoltalk_cap", str(smoltalk_cap),
-         "--bactrian_cap", str(bactrian_cap), "--xlam_cap", str(xlam_cap),
-         "--hermes_repeat", str(hermes_repeat),
-         "--extra_json", f"{DATA}/datasets/raw/kolosal-bench.json"],
-        cwd=REMOTE,
-        check=True,
-    )
+    cmd = ["python", "-u", "dllm/tools/prepare_sft_funcall.py",
+           "--tokenizer_path", A2D_DIR, "--output_dir", SFT_DIR,
+           "--max_length", str(max_length), "--num_proc", str(num_proc),
+           "--idfc_cap", str(idfc_cap), "--smoltalk_cap", str(smoltalk_cap),
+           "--bactrian_cap", str(bactrian_cap), "--xlam_cap", str(xlam_cap),
+           "--hermes_repeat", str(hermes_repeat),
+           "--extra_json", f"{DATA}/datasets/raw/kolosal-bench.json"]
+    if save_messages:
+        cmd += ["--save_messages_dir", SFT_MSG_DIR]
+    if from_messages:
+        cmd += ["--messages_dir", from_messages]
+    subprocess.run(cmd, cwd=REMOTE, check=True)
+    vol.commit()
+
+
+@app.function(cpu=8.0, memory=32768, timeout=24 * 3600, volumes={DATA: vol},
+              secrets=[modal.Secret.from_name("groq-key")])
+def rewrite_persona(messages_dir: str = SFT_MSG_DIR, output_dir: str = SFT_MSG_PERSONA_DIR,
+                    concurrency: int = 24, limit: int = 0):
+    """Groq persona rewrite of assistant turns (resumable via the JSONL cache on the Volume)."""
+    import subprocess
+
+    _ensure_repo()
+    cmd = ["python", "-u", "dllm/tools/persona_rewrite.py",
+           "--messages_dir", messages_dir, "--output_dir", output_dir,
+           "--cache_path", f"{DATA}/datasets/raw/persona-cache.jsonl",
+           "--concurrency", str(concurrency)]
+    if limit:
+        cmd += ["--limit", str(limit)]
+    subprocess.run(cmd, cwd=REMOTE, check=True)
     vol.commit()
 
 
