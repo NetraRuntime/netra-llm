@@ -35,6 +35,14 @@ DATA = "/data"
 BASE_MODEL = "Qwen/Qwen3.5-0.8B-Base"
 TEXT_DIR = f"{DATA}/qwen3_5-0.8b-text"
 A2D_DIR = f"{DATA}/a2d/qwen3_5-0.8b"
+N_GPU = 8  # H100 count for the multi-GPU bilingual run (train_multi)
+
+# Balanced bilingual mix (English + Bahasa Indonesia). The [weight:W] selectors trigger
+# interleaving in dllm's loader so neither language is starved under --max_steps.
+BILINGUAL = (
+    "HuggingFaceFW/fineweb-edu[name:sample-10BT,weight:0.5]"
+    "+HuggingFaceFW/fineweb-2[name:ind_Latn,weight:0.5]"
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -169,17 +177,96 @@ def train(
     vol.commit()
 
 
+@app.function(cpu=4.0, memory=16384, timeout=1800, volumes={DATA: vol})
+def peek_data(dataset: str = BILINGUAL, text_field: str = "text", n: int = 12):
+    """Stream a few examples from a (possibly interleaved) mix to verify it on Modal's
+    fast network — e.g. confirm EN and ID actually alternate before spending GPU."""
+    import dllm
+
+    _ensure_repo()
+    ds = dllm.data.load_pt_dataset(dataset, streaming=True)
+    it = iter(ds["train"])
+    for i in range(n):
+        t = next(it)[text_field]
+        print(f"[{i}] {t[:140]!r}", flush=True)
+
+
+@app.function(gpu=f"H100:{N_GPU}", timeout=24 * 3600, volumes={DATA: vol}, secrets=[wandb_secret])
+def train_multi(
+    dataset: str = BILINGUAL,
+    text_field: str = "text",
+    max_length: int = 1024,
+    batch: int = 8,
+    grad_accum: int = 2,
+    max_steps: int = 20000,
+    lr: float = 1e-4,
+    run_name: str = "m1-en-id",
+):
+    """Multi-GPU (N_GPU x H100) MDLM training on a streamed corpus, DDP via accelerate."""
+    import os
+
+    import torch
+
+    _ensure_repo()
+    nproc = torch.cuda.device_count()
+    out = f"{DATA}/runs/{run_name}"
+    resume = ""
+    if os.path.isdir(out):
+        ckpts = [d for d in os.listdir(out) if d.startswith("checkpoint-") and d[11:].isdigit()]
+        if ckpts:
+            latest = max(ckpts, key=lambda d: int(d[11:]))
+            resume = f"--resume_from_checkpoint '{out}/{latest}'"
+            print(f"[resume] from {out}/{latest}", flush=True)
+
+    _sh(
+        f"accelerate launch --config_file scripts/accelerate_configs/ddp.yaml --num_processes {nproc} "
+        "examples/a2d/mdlm/pt.py "
+        f"--model_name_or_path '{A2D_DIR}' "
+        f"--dataset_args '{dataset}' --text_field '{text_field}' --insert_eos True --streaming True "
+        f"--max_length {max_length} "
+        "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation sdpa "
+        "--gradient_checkpointing True "
+        f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
+        f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
+        "--eval_strategy no --report_to wandb "
+        f"--run_name '{run_name}' "
+        "--save_strategy steps --save_steps 0.05 --save_total_limit 3 --save_only_model False "
+        f"--output_dir '{out}' {resume}"
+    )
+    vol.commit()
+
+
+# Raw / unconditional MDLM sampling for a *pretrained* (non-instruct) checkpoint.
+# (examples/a2d/mdlm/sample.py applies a chat template with math/code prompts, which is
+#  meaningless for a raw text PT model — here we use empty + text-prefix prompts.)
+RAW_SAMPLE = r'''
+import sys, dllm
+ckpt, steps, mnt, temp = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+model = dllm.utils.get_model(model_name_or_path=ckpt, dtype="bfloat16").eval()
+tok = dllm.utils.get_tokenizer(model_name_or_path=ckpt)
+sampler = dllm.core.samplers.MDLMSampler(model=model, tokenizer=tok)
+cfg = dllm.core.samplers.MDLMSamplerConfig(
+    steps=steps, max_new_tokens=mnt, block_size=32, temperature=temp, remasking="low_confidence")
+prompts = ["", "ROMEO:", "To be, or not to be,", "KING:\n"]
+inputs = [tok(p, add_special_tokens=False)["input_ids"] for p in prompts]
+out = sampler.sample(inputs, cfg, return_dict=True)
+seqs = dllm.utils.sample_trim(tok, out.sequences.tolist(), inputs)
+for p, s in zip(prompts, seqs):
+    print("=" * 70); print("PROMPT:", repr(p)); print((s.strip() or "<empty>"))
+'''
+
+
 @app.function(gpu="H100", timeout=3600, volumes={DATA: vol})
-def sample(run_name: str = "m1-tinyshake", steps: int = 128, max_new_tokens: int = 128):
-    """Sample from a trained checkpoint (the M1 gate)."""
+def sample(run_name: str = "m1-tinyshake", steps: int = 128, max_new_tokens: int = 128, temperature: float = 0.0):
+    """Raw/unconditional sampling from a trained PT checkpoint (the M1 gate)."""
+    import subprocess
+
     _ensure_repo()
     ckpt = f"{DATA}/runs/{run_name}/checkpoint-final"
-    _sh(
-        "python -u examples/a2d/mdlm/sample.py "
-        f"--model_name_or_path '{ckpt}' "
-        "--dtype bfloat16 --attn_implementation sdpa "
-        f"--steps {steps} --max_new_tokens {max_new_tokens} "
-        "--remasking low_confidence --temperature 0.0"
+    subprocess.run(
+        ["python", "-u", "-c", RAW_SAMPLE, ckpt, str(steps), str(max_new_tokens), str(temperature)],
+        cwd=REMOTE,
+        check=True,
     )
 
 
