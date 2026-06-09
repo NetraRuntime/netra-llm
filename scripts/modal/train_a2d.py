@@ -222,6 +222,8 @@ def train_multi(
     lr: float = 1e-4,
     block_size: int = 32,
     save_steps: float = 0.05,
+    attn: str = "sdpa",
+    num_workers: int = 8,
     model_dir: str = A2D_DIR,
     run_name: str = "bd3lm-en-id",
 ):
@@ -247,9 +249,11 @@ def train_multi(
         f"--model_name_or_path '{model_dir}' "
         f"--dataset_args '{dataset}' --text_field '{text_field}' --insert_eos True --streaming True "
         f"--max_length {max_length} --block_size {block_size} "
-        # flex_attention: BD3LM's block-causal mask as a block-sparse kernel (vs dense-mask sdpa).
-        "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation flex_attention "
+        f"--dtype bfloat16 --bf16 True --fp16 False --attn_implementation {attn} "
         "--gradient_checkpointing True "
+        # parallel data loading: streaming + on-the-fly tokenization of the 3-way mix starves the
+        # GPUs at num_workers=0; prefetch with worker processes so the GPUs aren't data-bound.
+        f"--dataloader_num_workers {num_workers} --dataloader_prefetch_factor 4 "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
         f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
         "--eval_strategy no --report_to wandb "
