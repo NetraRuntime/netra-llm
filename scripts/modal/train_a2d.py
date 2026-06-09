@@ -409,8 +409,7 @@ def nccl_bench():
     with open("/tmp/nccl_bench.py", "w") as f:
         f.write(NCCL_SCRIPT)
     subprocess.run(
-        "NCCL_DEBUG=INFO torchrun --nproc_per_node 8 /tmp/nccl_bench.py 2>&1 | "
-        "grep -E 'allreduce|busbw|NVLS|P2P|SHM|NET/|via|Connected|Channel 00' | head -60",
+        "NCCL_DEBUG=WARN torchrun --nproc_per_node 8 /tmp/nccl_bench.py",
         shell=True,
         check=True,
     )
