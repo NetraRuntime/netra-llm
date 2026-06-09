@@ -104,7 +104,8 @@ class A2DQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         out_fwd = self._scan(query, key, value, g, beta)
         if bidirectional:
-            flip = lambda t: torch.flip(t, dims=[1])
+            def flip(t):
+                return torch.flip(t, dims=[1])
             out_bwd = self._scan(flip(query), flip(key), flip(value), flip(g), flip(beta))
             core_attn_out = out_fwd + torch.flip(out_bwd, dims=[1])
         else:
@@ -161,7 +162,9 @@ class A2DQwen3_5TextModel(Qwen3_5TextModel):
                 inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long
             )
         full_attn_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
-        # linear-attention layers: keep stock 2D padding-mask handling (causal in M1)
+        # linear-attention layers: 2D padding mask only; their bidirectionality (when
+        # config.bidirectional_linear) comes from the dual-scan in A2DQwen3_5GatedDeltaNet,
+        # not from this mask.
         linear_attn_mask = self._update_linear_attn_mask(attention_mask, past_key_values)
         # -----------------------------------------------------------------------------
 
