@@ -39,6 +39,9 @@ class MDLMTrainer(transformers.Trainer):
         *pargs,
         **kwargs,
     ):
+        # transformers>=5 renamed Trainer's `tokenizer` arg to `processing_class`.
+        if "tokenizer" in kwargs and "processing_class" not in kwargs:
+            kwargs["processing_class"] = kwargs.pop("tokenizer")
         super().__init__(args=args, *pargs, **kwargs)
 
         if not (0.0 < args.time_epsilon < 1.0):
