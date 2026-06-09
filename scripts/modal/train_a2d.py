@@ -353,6 +353,65 @@ def train_multi(
     vol.commit()
 
 
+# Single-GPU BD3LM step microbench + torch.profiler: replicates the training step exactly
+# (bf16, sdpa, optional grad-ckpt, [noised|clean] concat + 4D block mask, fwd+bwd) with NO
+# DDP and NO dataloader — isolates pure compute and names the top CUDA kernels.
+PROF_SCRIPT = r'''
+import sys, time, torch, dllm
+from dllm.core.trainers.bd3lm import _create_bd3lm_attention_mask
+
+model_dir, batch, seqlen, blk, ckpt_flag = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+model = dllm.utils.get_model(model_name_or_path=model_dir, dtype="bfloat16", attn_implementation="sdpa")
+model = model.cuda().train()
+if ckpt_flag == "True":
+    model.gradient_checkpointing_enable()
+tok = dllm.utils.get_tokenizer(model_name_or_path=model_dir)
+l = seqlen
+ids = torch.randint(5, 1000, (batch, l), device="cuda")
+noised = ids.clone(); noised[:, ::3] = tok.mask_token_id
+concat = torch.cat([noised, ids], dim=1)
+m = _create_bd3lm_attention_mask(None, None, torch.arange(2*l)[:, None], torch.arange(2*l)[None, :], block_size=blk, n=l)
+m = m.unsqueeze(0).unsqueeze(0).expand(1, 1, 2*l, 2*l).cuda()
+pos = torch.cat([torch.arange(l), torch.arange(l)]).unsqueeze(0).expand(batch, -1).cuda()
+
+def step():
+    out = model(input_ids=concat, attention_mask=m, position_ids=pos)
+    loss = out.logits.float().mean()
+    loss.backward()
+    model.zero_grad(set_to_none=True)
+
+for i in range(2):  # warmup / compile
+    t = time.time(); step(); torch.cuda.synchronize()
+    print(f"[warmup {i}] {time.time()-t:.2f}s", flush=True)
+torch.cuda.synchronize(); t0 = time.time()
+for _ in range(3):
+    step()
+torch.cuda.synchronize()
+print(f"[steady] fwd+bwd: {(time.time()-t0)/3:.2f}s/iter (batch {batch}, concat seq {2*l})", flush=True)
+
+from torch.profiler import profile, ProfilerActivity
+with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+    step()
+    torch.cuda.synchronize()
+print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=25), flush=True)
+'''
+
+
+@app.function(gpu="B200", timeout=3600, volumes={DATA: vol})
+def profile_step(batch: int = 8, max_length: int = 1024, block_size: int = 32,
+                 grad_ckpt: bool = True, model_dir: str = A2D_DIR):
+    """Profile one BD3LM training step on a single B200 (no DDP/dataloader)."""
+    import subprocess
+
+    _ensure_repo()
+    subprocess.run(
+        ["python", "-u", "-c", PROF_SCRIPT, model_dir, str(batch), str(max_length),
+         str(block_size), str(grad_ckpt)],
+        cwd=REMOTE,
+        check=True,
+    )
+
+
 # Raw / unconditional BD3LM sampling for a *pretrained* (non-instruct) checkpoint.
 # (examples/a2d/bd3lm/sample.py applies a chat template with math/code prompts, meaningless
 #  for a raw text PT model — here we use empty + text-prefix prompts.)
