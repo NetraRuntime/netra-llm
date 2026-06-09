@@ -218,6 +218,7 @@ def train_multi(
     max_steps: int = 75000,  # eff-batch 128 x 1024 = ~9.8B tok; 1/3 each EN/ID/code (~3.3B, ~13 epochs)
     lr: float = 1e-4,
     block_size: int = 32,
+    save_steps: float = 0.05,
     model_dir: str = A2D_DIR,
     run_name: str = "bd3lm-en-id",
 ):
@@ -249,7 +250,7 @@ def train_multi(
         f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
         "--eval_strategy no --report_to wandb "
         f"--run_name '{run_name}' "
-        "--save_strategy steps --save_steps 0.05 --save_total_limit 3 --save_only_model False "
+        f"--save_strategy steps --save_steps {save_steps} --save_total_limit 3 --save_only_model False "
         f"--output_dir '{out}' {resume}"
     )
     vol.commit()
