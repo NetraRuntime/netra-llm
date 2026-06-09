@@ -71,7 +71,7 @@ class TrainingArguments(transformers.TrainingArguments):
     def __post_init__(self):
         super().__post_init__()
         self.run_name = self.run_name or self.output_dir
-        if self.group_by_length:
+        if getattr(self, "group_by_length", False):  # removed from transformers>=5 TrainingArguments
             logger.info(
                 "training_args.group_by_length=True: preprocessing "
                 "may take some time after `trainer.train()` starts."
