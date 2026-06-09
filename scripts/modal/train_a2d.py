@@ -326,7 +326,9 @@ def train_multi(
     # "save EVERY step" (a ~40GB volume write per step — this masqueraded as a perf bug).
     save_steps: float = 0.05,
     save_strategy: str = "steps",  # pass "no" for timing smokes
-    attn: str = "sdpa",
+    # flex_attention + the cached BlockMask exploits the BD3LM mask's 69% block sparsity:
+    # measured 1.29s/step vs 1.44 sdpa (1xB200). sample() still forces sdpa at load.
+    attn: str = "flex_attention",
     num_workers: int = 4,  # per rank; 8 ranks x (1 main + 4 workers) fits the 64-core cap
     # ckpt off fits since logits_to_keep + flat-CE freed ~12GB/rank, and saves the recompute:
     # measured 1.44s/step vs 2.8-3s with ckpt on (1xB200, full fix stack).
