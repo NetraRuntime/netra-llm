@@ -8,6 +8,10 @@ pip install -e .
 pip install lm_eval trl
 # transformers build that ships qwen3_5 (overrides the relaxed pin)
 pip install --upgrade "git+https://github.com/huggingface/transformers.git"
+# dllm pins peft==0.17.1 / accelerate==1.11.0, which are too old for transformers-main
+# (peft 0.17 does `from transformers import HybridCache`, since removed upstream).
+# Upgrade both to track the new transformers.
+pip install -U peft accelerate
 # QLoRA deps (optional extra in dllm)
 pip install bitsandbytes==0.48.1
 # T4: NO flash-attn (sm_75 unsupported). sdpa is used instead.
