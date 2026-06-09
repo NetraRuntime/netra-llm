@@ -14,9 +14,11 @@ model on a free Colab **T4 (16 GB)**. See the design spec and plan under
 
 ## Cell 1 — clone, env, Drive
 ```bash
+%cd /content
+!rm -rf netra-llm                       # idempotent: re-running won't nest clones
 !git clone -b a2d-qwen3_5-bidirectional https://github.com/NetraRuntime/netra-llm.git
-%cd netra-llm
-!bash scripts/colab/setup.sh          # installs dllm + transformers(main, has qwen3_5) + bitsandbytes
+%cd /content/netra-llm
+!bash scripts/colab/setup.sh            # installs deps + git-main transformers (qwen3_5); ends with "qwen3_5 + dllm import OK"
 ```
 ```python
 from google.colab import drive; drive.mount('/content/drive')
