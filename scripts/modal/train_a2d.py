@@ -302,7 +302,7 @@ def prepare_data(max_length: int = 1024, num_proc: int = 64, force: bool = False
 # 1 rank is fine; 8 ranks + dataloader workers contend for that share and the GPUs starve
 # waiting on kernel-launch threads (measured: 3.7s/step at 1 GPU vs 27-60s/step at 8 GPUs
 # with compute=1.34s and NCCL=738GB/s both healthy).
-@app.function(gpu=f"B200:{N_GPU}", cpu=96.0, memory=393216, timeout=24 * 3600,
+@app.function(gpu=f"B200:{N_GPU}", cpu=64.0, memory=393216, timeout=24 * 3600,
               volumes={DATA: vol}, secrets=[wandb_secret])
 def train_multi(
     dataset: str = PREP_DIR,
@@ -315,7 +315,7 @@ def train_multi(
     block_size: int = 32,
     save_steps: float = 0.05,
     attn: str = "sdpa",
-    num_workers: int = 8,
+    num_workers: int = 4,  # per rank; 8 ranks x (1 main + 4 workers) fits the 64-core cap
     grad_ckpt: bool = True,
     preprocessed: bool = True,
     model_dir: str = A2D_DIR,
