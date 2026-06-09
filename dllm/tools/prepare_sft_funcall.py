@@ -281,8 +281,8 @@ def multiturn_sft_map_fn(batch, *, tokenizer, max_length):
     """Batched explode-map: each conversation yields >=0 windowed training rows.
     Nothing over-long is dropped wholesale — long conversations are windowed and
     oversized single turns are middle-truncated."""
-    out_ids, out_labels = [], []
-    for messages in batch["messages"]:
+    out_ids, out_labels, out_src = [], [], []
+    for messages, src in zip(batch["messages"], batch.get("source", [""] * len(batch["messages"]))):
         try:
             windows = windowed_examples(messages, tokenizer, max_length)
         except Exception:
@@ -290,7 +290,8 @@ def multiturn_sft_map_fn(batch, *, tokenizer, max_length):
         for ids, labels in windows:
             out_ids.append(ids)
             out_labels.append(labels)
-    return {"input_ids": out_ids, "labels": out_labels}
+            out_src.append(src)
+    return {"input_ids": out_ids, "labels": out_labels, "source": out_src}
 
 
 def main():
@@ -322,7 +323,7 @@ def main():
     ):
         ds = datasets.load_dataset("NousResearch/hermes-function-calling-v1", cfg, split="train")
         ds = ds.map(
-            lambda r: {"messages": hermes_to_messages(r)},
+            lambda r, _c=cfg: {"messages": hermes_to_messages(r), "source": f"hermes/{_c}"},
             remove_columns=ds.column_names,
             num_proc=args.num_proc,
             desc=f"hermes:{cfg}",
@@ -339,7 +340,7 @@ def main():
             if len(ds) > args.xlam_cap:
                 ds = ds.shuffle(seed=42).select(range(args.xlam_cap))
             ds = ds.map(
-                lambda r: {"messages": xlam_to_messages(r)},
+                lambda r: {"messages": xlam_to_messages(r), "source": "xlam"},
                 remove_columns=ds.column_names,
                 num_proc=args.num_proc,
                 desc="xlam",
@@ -356,7 +357,7 @@ def main():
     if args.idfc_cap and len(ds) > args.idfc_cap:
         ds = ds.shuffle(seed=42).select(range(args.idfc_cap))
     ds = ds.map(
-        lambda r: {"messages": idfc_to_messages(r)},
+        lambda r: {"messages": idfc_to_messages(r), "source": "id-functioncall"},
         remove_columns=ds.column_names,
         num_proc=args.num_proc,
         desc="id-funcall",
@@ -370,7 +371,7 @@ def main():
         ds = datasets.load_dataset("HuggingFaceTB/smoltalk", "all", split="train")
         ds = ds.shuffle(seed=42).select(range(min(args.chat_cap, len(ds))))
         ds = ds.map(
-            lambda r: {"messages": [dict(m) for m in r["messages"]]},
+            lambda r: {"messages": [dict(m) for m in r["messages"]], "source": "smoltalk-en"},
             remove_columns=ds.column_names,
             num_proc=args.num_proc,
             desc="smoltalk",
@@ -387,7 +388,7 @@ def main():
         )
         ds = ds.shuffle(seed=42).select(range(min(args.chat_cap, len(ds))))
         ds = ds.map(
-            lambda r: {"messages": bactrian_to_messages(r)},
+            lambda r: {"messages": bactrian_to_messages(r), "source": "bactrian-id"},
             remove_columns=ds.column_names,
             num_proc=args.num_proc,
             desc="bactrian-id",
@@ -398,7 +399,7 @@ def main():
     # --- Kolosal benchmark gold (summarize/translate/paraphrase, ID customer-service) ---
     if args.extra_json and os.path.exists(args.extra_json):
         rows = kolosal_bench_to_rows(args.extra_json)
-        parts.append(datasets.Dataset.from_list(rows))
+        parts.append(datasets.Dataset.from_list([{**r, "source": "kolosal"} for r in rows]))
         print(f"[sft-prep] kolosal-bench: {len(rows):,} rows", flush=True)
     elif args.extra_json:
         print(f"[sft-prep] WARN extra_json not found: {args.extra_json}", flush=True)

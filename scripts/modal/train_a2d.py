@@ -268,12 +268,16 @@ def count_sft_tokens(path: str = SFT_DIR):
     """Exact token census of a pre-tokenized SFT corpus: total vs supervised tokens."""
     from datasets import load_from_disk
 
+    from collections import defaultdict
+
     ds = load_from_disk(path)
     for split, d in ds.items():
+        has_src = "source" in d.column_names
         stats = d.map(
             lambda b: {
                 "n": [len(x) for x in b["input_ids"]],
                 "s": [sum(1 for v in lab if v != -100) for lab in b["labels"]],
+                "src": b.get("source", [""] * len(b["input_ids"])),
             },
             batched=True,
             num_proc=16,
@@ -285,6 +289,19 @@ def count_sft_tokens(path: str = SFT_DIR):
             f"supervised={sup/1e6:.1f}M ({100*sup/total:.1f}%)  avg_len={total/len(d):.0f}",
             flush=True,
         )
+        if has_src and split == "train":
+            agg = defaultdict(lambda: [0, 0, 0])
+            for n, s, src in zip(stats["n"], stats["s"], stats["src"]):
+                key = src.split("/")[0]  # collapse hermes/* configs
+                agg[key][0] += 1
+                agg[key][1] += n
+                agg[key][2] += s
+            for src, (rows, tot, supv) in sorted(agg.items(), key=lambda kv: -kv[1][2]):
+                print(
+                    f"[census]   {src:<16} rows={rows:>7,}  total={tot/1e6:>6.1f}M  "
+                    f"supervised={supv/1e6:>5.1f}M ({100*supv/sup:.1f}% of supervision)",
+                    flush=True,
+                )
 
 
 # Materialize + tokenize + pack the 3-source corpus with maximum parallelism:
