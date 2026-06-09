@@ -6,20 +6,22 @@ pip install -e .
 # lm-evaluation-harness is normally a git submodule we don't need for a2d, so just
 # pull the PyPI packages to satisfy `import dllm`.
 pip install lm_eval trl
-# transformers build that ships qwen3_5 (overrides the relaxed pin)
-pip install --upgrade "git+https://github.com/huggingface/transformers.git"
-# dllm pins peft==0.17.1 / accelerate==1.11.0, which are too old for transformers-main
-# (peft 0.17 does `from transformers import HybridCache`, since removed upstream).
-# Upgrade both to track the new transformers.
-pip install -U peft accelerate
+# transformers from git main = the build that actually ships qwen3_5. force-reinstall so
+# it wins over any PyPI dev wheel that LACKS the module (a same-versioned wheel exists),
+# and keep deps so huggingface_hub etc. upgrade to match. DO NOT run any other
+# `pip install transformers...` after this line, or you'll clobber qwen3_5.
+pip install --upgrade --force-reinstall "git+https://github.com/huggingface/transformers.git"
 # QLoRA deps (optional extra in dllm)
 pip install bitsandbytes==0.48.1
 # T4: NO flash-attn (sm_75 unsupported). sdpa is used instead.
+# transformers-main dropped HybridCache / is_torch_fx_available that peft and the llada2
+# pipeline import; dllm/_compat.py restores them on `import dllm`, so no peft pin churn needed.
 python - <<'PY'
-import transformers, torch
+import torch
+import dllm                  # runs dllm/_compat shims, then imports the package
+import dllm.pipelines.a2d    # registers the a2d-qwen3_5 model
+import transformers
 from transformers import Qwen3_5ForCausalLM
-import dllm  # fail loudly here if the package import chain is broken
-import dllm.pipelines.a2d  # noqa: F401  (registers the a2d-qwen3_5 model)
 print("transformers", transformers.__version__, "torch", torch.__version__)
 print("qwen3_5 + dllm import OK")
 PY
