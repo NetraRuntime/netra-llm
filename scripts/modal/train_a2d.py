@@ -579,6 +579,68 @@ def eval_nll(model_path: str = f"{DATA}/runs/bd3lm-4b-en-id-code-20k/checkpoint-
     )
 
 
+BEST_PT_CKPT = f"{DATA}/runs/bd3lm-4b-en-id-code-20k/checkpoint-26000"
+
+
+@app.function(gpu=f"B200:{N_GPU}", cpu=64.0, memory=393216, timeout=24 * 3600,
+              volumes={DATA: vol}, secrets=[wandb_secret],
+              retries=modal.Retries(max_retries=3, initial_delay=15.0))
+def sft_multi(
+    dataset: str = SFT_DIR,
+    model_dir: str = BEST_PT_CKPT,
+    max_length: int = 4096,
+    batch: int = 4,
+    grad_accum: int = 4,
+    epochs: int = 2,
+    lr: float = 1e-5,  # gentle regime — 1e-4 measured destructive on this conversion
+    block_size: int = 32,
+    run_name: str = "bd3lm-4b-sft-funcall",
+):
+    """BD3LM SFT on the pre-tokenized function-calling corpus (8xB200, DDP).
+    sdpa (variable-length batches would make flex recompile per shape) + grad ckpt ON
+    (4096-token rows). Effective batch = 4 x 8 x 4 = 128 sequences, matching PT."""
+    import os
+
+    import torch
+
+    nproc = torch.cuda.device_count()
+    assert nproc == N_GPU, f"expected {N_GPU} GPUs, found {nproc}"
+    for i in range(nproc):
+        torch.zeros(1, device=f"cuda:{i}")
+    torch.cuda.synchronize()
+    print(f"[health] {nproc} GPUs initialized OK", flush=True)
+
+    _ensure_repo()
+    out = f"{DATA}/runs/{run_name}"
+    resume = ""
+    if os.path.isdir(out):
+        ckpts = [d for d in os.listdir(out) if d.startswith("checkpoint-") and d[11:].isdigit()]
+        if ckpts:
+            latest = max(ckpts, key=lambda d: int(d[11:]))
+            resume = f"--resume_from_checkpoint '{out}/{latest}'"
+            print(f"[resume] from {out}/{latest}", flush=True)
+
+    _sh(
+        f"accelerate launch --config_file scripts/accelerate_configs/ddp.yaml --num_processes {nproc} "
+        "examples/a2d/bd3lm/sft.py "
+        f"--model_name_or_path '{model_dir}' "
+        f"--dataset_args '{dataset}' --load_preprocessed_data True "
+        f"--max_length {max_length} --block_size {block_size} "
+        "--dtype bfloat16 --bf16 True --fp16 False --attn_implementation sdpa "
+        "--gradient_checkpointing True --ddp_find_unused_parameters False "
+        "--optim adamw_torch_fused "
+        "--dataloader_num_workers 4 --dataloader_prefetch_factor 4 "
+        f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
+        f"--num_train_epochs {epochs} --learning_rate {lr} --lr_scheduler_type cosine "
+        "--warmup_ratio 0.03 --logging_steps 10 "
+        "--eval_strategy no --report_to wandb "
+        f"--run_name '{run_name}' "
+        "--save_strategy steps --save_steps 0.1 --save_total_limit 3 --save_only_model False "
+        f"--output_dir '{out}' {resume}"
+    )
+    vol.commit()
+
+
 # AR control: the SAME prompts through the stock Qwen3.5-4B-Base text backbone
 # (autoregressive generate) — separates "our diffusion adaptation loops" from
 # "the 4B base loops anyway".
