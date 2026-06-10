@@ -120,7 +120,9 @@ def train():
             )
         ),
     )
-    trainer.train()
+    # NOTE: Trainer.train() IGNORES args.resume_from_checkpoint unless passed explicitly
+    # (classic HF footgun — a bare train() silently restarts from scratch).
+    trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint or None)
     trainer.save_model(os.path.join(training_args.output_dir, "checkpoint-final"))
     trainer.processing_class.save_pretrained(
         os.path.join(training_args.output_dir, "checkpoint-final")
