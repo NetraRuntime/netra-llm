@@ -235,7 +235,10 @@ class Rewriter:
                     time.sleep(delay)
                     delay = min(delay * 2, 60)
                     continue
-                raise
+                # any other API error (400/413/content policy/...): never kill the job —
+                # log and fall back to the original text for this turn.
+                print(f"[persona] WARN non-retryable: {type(e).__name__}: {msg[:140]}", flush=True)
+                return ""
         return ""  # give up -> fallback to original
 
     def rewrite(self, text, lang):
