@@ -575,6 +575,47 @@ def eval_nll(model_path: str = f"{DATA}/runs/bd3lm-4b-en-id-code-20k/checkpoint-
     )
 
 
+# AR control: the SAME prompts through the stock Qwen3.5-4B-Base text backbone
+# (autoregressive generate) — separates "our diffusion adaptation loops" from
+# "the 4B base loops anyway".
+AR_SAMPLE = r'''
+import sys, torch, transformers
+model_dir, mnt, temp = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+tok = transformers.AutoTokenizer.from_pretrained(model_dir)
+model = transformers.AutoModelForCausalLM.from_pretrained(
+    model_dir, dtype=torch.bfloat16, attn_implementation="sdpa").cuda().eval()
+prompts = [
+    "The history of artificial intelligence began",
+    "Cara membuat nasi goreng yang enak adalah",
+    "Jakarta adalah ibu kota Indonesia yang",
+    "def fibonacci(n):\n",
+]
+for p in prompts:
+    ids = tok(p, return_tensors="pt").input_ids.cuda()
+    kw = dict(max_new_tokens=mnt, pad_token_id=tok.eos_token_id)
+    if temp > 0:
+        kw.update(do_sample=True, temperature=temp, top_p=0.95)
+    else:
+        kw.update(do_sample=False)
+    out = model.generate(ids, **kw)
+    print("=" * 70); print("PROMPT:", repr(p))
+    print(tok.decode(out[0][ids.shape[1]:], skip_special_tokens=True).strip()[:1200])
+'''
+
+
+@app.function(gpu="H100", timeout=3600, volumes={DATA: vol})
+def sample_ar(model_dir: str = TEXT_DIR, max_new_tokens: int = 256, temperature: float = 0.8):
+    """AR baseline generations from the stock base text backbone (same prompts)."""
+    import subprocess
+
+    _ensure_repo()
+    subprocess.run(
+        ["python", "-u", "-c", AR_SAMPLE, model_dir, str(max_new_tokens), str(temperature)],
+        cwd=REMOTE,
+        check=True,
+    )
+
+
 # Single-GPU BD3LM step microbench + torch.profiler: replicates the training step exactly
 # (bf16, sdpa, optional grad-ckpt, [noised|clean] concat + 4D block mask, fwd+bwd) with NO
 # DDP and NO dataloader — isolates pure compute and names the top CUDA kernels.
