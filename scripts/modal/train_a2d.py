@@ -703,12 +703,12 @@ for p, s in zip(prompts, seqs):
 
 @app.function(gpu="H100", timeout=3600, volumes={DATA: vol})
 def sample(run_name: str = "bd3lm-tinyshake", steps: int = 128, max_new_tokens: int = 128,
-           temperature: float = 0.0, block_size: int = 32):
+           temperature: float = 0.0, block_size: int = 32, ckpt: str = ""):
     """Raw/unconditional BD3LM sampling from a trained PT checkpoint (the gate)."""
     import subprocess
 
     _ensure_repo()
-    ckpt = f"{DATA}/runs/{run_name}/checkpoint-final"
+    ckpt = ckpt or f"{DATA}/runs/{run_name}/checkpoint-final"
     subprocess.run(
         ["python", "-u", "-c", RAW_SAMPLE, ckpt, str(steps), str(max_new_tokens),
          str(temperature), str(block_size)],
