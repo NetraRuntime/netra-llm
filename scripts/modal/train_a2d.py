@@ -424,6 +424,9 @@ def train_multi(
     grad_accum: int = 2,
     max_steps: int = 75000,  # eff-batch 128 x 1024 = ~9.8B tok; 1/3 each EN/ID/code (~3.3B, ~13 epochs)
     lr: float = 1e-4,
+    # constant => the lr arg is delivered as-is for the whole segment (cosine near max_steps
+    # would silently decay a resumed run's lr to ~0, breaking lr experiments).
+    lr_scheduler: str = "cosine",
     block_size: int = 32,
     # CAUTION: HF treats save_steps floats <1.0 as a ratio of max_steps; exactly 1.0 means
     # "save EVERY step" (a ~40GB volume write per step — this masqueraded as a perf bug).
@@ -483,7 +486,8 @@ def train_multi(
         f"--optim {optim} "
         f"--dataloader_num_workers {num_workers} --dataloader_prefetch_factor 4 "
         f"--per_device_train_batch_size {batch} --gradient_accumulation_steps {grad_accum} "
-        f"--max_steps {max_steps} --learning_rate {lr} --logging_steps 10 "
+        f"--max_steps {max_steps} --learning_rate {lr} --lr_scheduler_type {lr_scheduler} "
+        "--logging_steps 10 "
         "--eval_strategy no --report_to wandb "
         f"--run_name '{run_name}' "
         f"--save_strategy {save_strategy} --save_steps {save_steps} --save_total_limit 3 --save_only_model False "
