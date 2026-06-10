@@ -414,7 +414,8 @@ def prepare_data(max_length: int = 1024, num_proc: int = 64, force: bool = False
 # waiting on kernel-launch threads (measured: 3.7s/step at 1 GPU vs 27-60s/step at 8 GPUs
 # with compute=1.34s and NCCL=738GB/s both healthy).
 @app.function(gpu=f"B200:{N_GPU}", cpu=64.0, memory=393216, timeout=24 * 3600,
-              volumes={DATA: vol}, secrets=[wandb_secret])
+              volumes={DATA: vol}, secrets=[wandb_secret],
+              retries=modal.Retries(max_retries=3, initial_delay=15.0))
 def train_multi(
     dataset: str = PREP_DIR,
     text_field: str = "text",
@@ -446,8 +447,18 @@ def train_multi(
 
     import torch
 
-    _ensure_repo()
+    # Fail-fast node health check: on broken B200 hosts CUDA *enumerates* 8 devices but
+    # can't *initialize* (Error 802, fabric/NVSwitch down) — training ranks then die after
+    # minutes of model loading. Touch every GPU now; a raise triggers the Modal retry,
+    # which reschedules onto a different node.
     nproc = torch.cuda.device_count()
+    assert nproc == N_GPU, f"expected {N_GPU} GPUs, found {nproc}"
+    for i in range(nproc):
+        torch.zeros(1, device=f"cuda:{i}")
+    torch.cuda.synchronize()
+    print(f"[health] {nproc} GPUs initialized OK", flush=True)
+
+    _ensure_repo()
     out = f"{DATA}/runs/{run_name}"
     resume = ""
     if os.path.isdir(out):
