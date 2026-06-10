@@ -549,6 +549,21 @@ def nccl_bench():
     )
 
 
+@app.function(gpu="B200", timeout=2 * 3600, volumes={DATA: vol})
+def eval_nll(model_path: str = f"{DATA}/runs/bd3lm-4b-en-id-code-20k/checkpoint-final",
+             rows: int = 64, draws: int = 4):
+    """Held-out per-domain NELBO (exact training estimator, fixed seed)."""
+    import subprocess
+
+    _ensure_repo()
+    subprocess.run(
+        ["python", "-u", "dllm/tools/eval_bd3lm_nll.py", "--model_path", model_path,
+         "--rows", str(rows), "--draws", str(draws)],
+        cwd=REMOTE,
+        check=True,
+    )
+
+
 # Single-GPU BD3LM step microbench + torch.profiler: replicates the training step exactly
 # (bf16, sdpa, optional grad-ckpt, [noised|clean] concat + 4D block mask, fwd+bwd) with NO
 # DDP and NO dataloader — isolates pure compute and names the top CUDA kernels.
@@ -619,7 +634,13 @@ tok = dllm.utils.get_tokenizer(model_name_or_path=ckpt)
 sampler = dllm.core.samplers.BD3LMSampler(model=model, tokenizer=tok)
 cfg = dllm.core.samplers.BD3LMSamplerConfig(
     steps=steps, max_new_tokens=mnt, block_size=blk, temperature=temp, remasking="low_confidence")
-prompts = ["", "ROMEO:", "To be, or not to be,", "KING:\n"]
+prompts = [
+    "",
+    "The history of artificial intelligence began",
+    "Cara membuat nasi goreng yang enak adalah",
+    "Jakarta adalah ibu kota Indonesia yang",
+    "def fibonacci(n):\n",
+]
 inputs = [tok(p, add_special_tokens=False)["input_ids"] for p in prompts]
 out = sampler.sample(inputs, cfg, return_dict=True)
 seqs = dllm.utils.sample_trim(tok, out.sequences.tolist(), inputs)
